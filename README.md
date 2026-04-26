@@ -1,235 +1,182 @@
-# 🧠 Hindsight Memory Plugin for Agent Zero
+# Hindsight Memory Plugin for Agent Zero - Hermes-Style Lifecycle PoC
 
-Augments Agent Zero's built-in memory with [Hindsight](https://github.com/vectorize-io/hindsight) by [Vectorize.io](https://vectorize.io). Gives Agent Zero persistent, semantically-rich memory that goes beyond simple vector similarity — with disposition-aware context generation.
+This fork is a proof of concept based on the original Agent Zero Hindsight plugin.
+The original plugin connects Agent Zero to [Hindsight](https://github.com/vectorize-io/hindsight), allowing Agent Zero to retain conversation memory, recall relevant memories, and optionally inject Hindsight reflect context.
 
-## What It Does
+This branch keeps that purpose, but changes the default memory lifecycle to be leaner and closer to the Hindsight integration used by Hermes Agent.
 
-| Feature | Description |
-|---------|-------------|
-| **Automatic Retain** | Conversation memories are extracted and stored in Hindsight banks after each interaction |
-| **Enhanced Recall** | Memory recall is enriched with Hindsight's semantic search alongside the built-in vector memory |
-| **Reflect Context** | Disposition-aware context is generated and injected into the system prompt |
-| **Project Isolation** | Memory banks are automatically scoped by project for clean separation |
-| **Graceful Degradation** | If Hindsight is unavailable, the agent continues normally with built-in memory |
-| **Settings UI** | Configure all settings directly in A0's settings panel |
-| **Plugin System Conformant** | Built for A0's plugin architecture (plugin.yaml, extensions, settings) |
+## What Changed
 
-## How It Works
+The main change is that routine memory retention no longer extracts many individual memory fragments in the plugin.
 
-```
-┌─────────────┐     recall once      ┌──────────────┐
-│ Agent Zero  │ ◀────────────────── │  Hindsight   │
-│ user turn   │                     │ memory bank  │
-└──────┬──────┘                     └──────┬───────┘
-       │                                   │
-       │ fenced temporary context          │
-       ▼                                   │
-┌─────────────┐                            │
-│ LLM answer  │                            │
-└──────┬──────┘                            │
-       │ one structured chatlog retain     │
-       └──────────────────────────────────▶│
+Instead, the default lifecycle is:
+
+```text
+user turn -> one Hindsight recall -> fenced temporary context -> LLM response -> gated structured chatlog retain
 ```
 
-1. **Recall** — Once per user turn, Hindsight is queried from the clean user message and injected as fenced temporary context.
-2. **Retain** — After the final response, the conversation is retained as one structured chatlog document via `retain_batch` with a stable `document_id`.
-3. **Solution extraction** — Optional and disabled by default. A utility-model extractor runs only after a heuristic gate detects substantive tool-backed work, then stores reusable solution cards with `solution` tags.
-4. **Reflect** — Optional advanced mode. Disabled by default for the lean lifecycle.
+The plugin submits structured conversation material to Hindsight and lets Hindsight do its own fact/entity/relationship extraction internally.
 
-The default lifecycle no longer calls a utility model to create individual memory fragments during retain. Hindsight may still display individual facts in the bank because it extracts facts internally from the retained chatlog document.
+## Key Improvements
 
-## Installation
+### Structured Chatlog Retain
 
-### 1. Clone into Agent Zero's user plugins directory
+- Retains one structured chatlog document with `retain_batch`.
+- Uses a stable `document_id` per Agent Zero session: `agent-zero:<context-id>`.
+- Sends the full accumulated chatlog so Hindsight can reprocess the evolving conversation.
+- Skips tool-result messages when building the chatlog.
+- Redacts common secret patterns before retain.
+
+### Retain Throttling
+
+Chatlog retain can now be batched instead of running after every short message.
+
+Defaults:
+
+```yaml
+hindsight_retain_min_messages: 3
+hindsight_retain_min_chars: 800
+```
+
+Retain runs when either threshold is reached since the last successful retain.
+Set both values to `0` to retain after every eligible turn.
+
+### One Recall Per User Turn
+
+- Recall runs at most once per user message.
+- The recall query is built from the clean user message.
+- Recalled context is injected as temporary fenced context:
+
+```xml
+<memory-context>
+...
+</memory-context>
+```
+
+The recalled memory context is not persisted back into Agent Zero history.
+
+### Optional Gated Solution Extraction
+
+This fork adds an optional replacement for Agent Zero's native "solutions" memory behavior.
+
+It is disabled by default:
+
+```yaml
+hindsight_solution_extract_enabled: false
+```
+
+When enabled, it only calls Agent Zero's utility model after a cheap heuristic gate detects substantive tool-backed work:
+
+```yaml
+hindsight_solution_extract_min_tool_calls: 1
+hindsight_solution_extract_min_chars: 1200
+```
+
+If reusable technical solutions are found, they are retained to Hindsight as solution documents with tags such as:
+
+```text
+agent-zero
+solution
+workflow
+tool:<tool-name>
+```
+
+This keeps normal conversation memory cheap while still allowing successful technical workflows to become reusable Hindsight memories.
+
+### Quieter, More Transparent Logging
+
+Normal operation now logs one concise line per actual Hindsight API operation:
+
+- `Recall from bank ...`
+- `Retain chatlog to bank ...`
+- `Retain solution to bank ...`
+- `Reflect from bank ...` if reflect is enabled
+
+Verbose lifecycle messages remain available through `hindsight_debug`.
+
+### Reflect Is Advanced/Optional
+
+Reflect remains supported, but is disabled by default.
+The recommended default lifecycle is recall plus structured chatlog retain.
+
+## Why This Direction
+
+The original plugin worked, but in testing it created too much activity for routine turns:
+
+- many plugin-side memory fragments
+- repeated status log entries
+- utility-model work for memory extraction even when Hindsight could extract from the retained document itself
+
+This fork aims for:
+
+- fewer utility-model calls
+- fewer retain calls
+- clearer separation between Agent Zero history and Hindsight recall context
+- Hindsight as the long-term memory provider
+- optional, explicit solution extraction for reusable technical workflows
+
+## Manual Installation
+
+This branch is not intended to be installed from the Plugin Hub.
+For manual testing:
 
 ```bash
-cd /a0/usr/plugins
-git clone https://github.com/YOUR_USERNAME/a0-plugin-hindsight.git hindsight
+cd /path/to/agent-zero/usr/plugins
+git clone -b codex/hermes-style-chatlog-lifecycle \
+  https://github.com/cstreil/a0_hindsight.git \
+  a0_hindsight
 ```
 
-Or copy the plugin files directly into `/a0/usr/plugins/hindsight/`.
+Then restart Agent Zero, enable the plugin, and configure:
 
-### 2. Install dependencies
+- Hindsight Base URL
+- Explicit Bank ID or Bank ID Prefix
+- Enable Recall
+- Enable Chatlog Retain
+- optionally Enable Solution Extraction
 
-```bash
-pip install hindsight-client>=0.4.0
-```
+Make sure the Agent Zero container can reach the Hindsight server URL.
 
-### 3. Set up a Hindsight server
+## Important Settings
 
-Follow the [Hindsight installation guide](https://github.com/vectorize-io/hindsight) to run a local server:
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `hindsight_recall_enabled` | `true` | Run one recall per user turn. |
+| `hindsight_retain_enabled` | `true` | Retain structured chatlogs to Hindsight. |
+| `hindsight_retain_min_messages` | `3` | Retain after this many new chatlog entries. |
+| `hindsight_retain_min_chars` | `800` | Retain after this many new chatlog characters. |
+| `hindsight_solution_extract_enabled` | `false` | Enable gated utility-model solution extraction. |
+| `hindsight_solution_extract_min_tool_calls` | `1` | Require new tool activity before solution extraction. |
+| `hindsight_solution_extract_min_chars` | `1200` | Require enough new chatlog content before solution extraction. |
+| `hindsight_operation_logging` | `true` | Show concise log entries for actual Hindsight operations. |
+| `hindsight_debug` | `false` | Show verbose lifecycle/debug logs. |
+| `hindsight_reflect_enabled` | `false` | Enable optional Hindsight reflect context. |
 
-```bash
-docker run -p 8888:8888 vectorize/hindsight
-```
+## Current Limitations
 
-Or use the Vectorize.io hosted service.
+- Solution documents are currently deduplicated by content hash. Similar but differently worded solutions may be stored as separate documents.
+- Secret redaction covers common patterns, but solution extraction should still be treated carefully in sensitive environments.
+- The solution extractor is intentionally conservative and gated, but it still uses Agent Zero's utility model when it runs.
 
-### 4. Configure in Agent Zero
+## Repository Context
 
-1. Go to **Settings → Agents → Hindsight Memory** and set:
-   - `Hindsight Base URL` — your Hindsight server URL (optional; e.g. `http://localhost:8888`)
-   - `HINDSIGHT_API_KEY` — (optional) API key if required by your server (in **Settings → Secrets**)
+Original plugin repository:
 
-2. Go to **Settings → Plugins** and enable **Hindsight Memory**
+https://github.com/neurocis/a0_hindsight
 
-3. (Optional) Click **Configure** on the plugin to adjust:
-   - Bank ID prefix
-   - Enable/disable retain, recall, reflect individually
-   - Recall/reflect budgets and token limits
-   - Cache TTL
+Proposal issue for this direction:
 
-### 5. Restart Agent Zero
+https://github.com/neurocis/a0_hindsight/issues/3
 
-The plugin will be discovered on restart. You'll see `[Hindsight] Integration enabled for bank: a0-default` in the logs.
+Proof-of-concept branch:
 
-## Plugin Structure
-
-```
-hindsight/
-├── plugin.yaml                          # Plugin manifest
-├── default_config.yaml                  # Settings defaults
-├── requirements.txt                     # hindsight-client>=0.4.0
-├── hooks.py                             # Install/update hooks
-├── execute.py                           # User-triggered setup & health check
-├── helpers/
-│   ├── __init__.py
-│   └── hindsight_helper.py              # Core integration logic
-├── extensions/
-│   └── python/
-│       ├── monologue_start/
-│       │   └── _20_hindsight_init.py    # Initialize Hindsight on agent start
-│       ├── monologue_end/
-│       │   └── _52_hindsight_retain.py  # Retain memories to Hindsight
-│       ├── message_loop_prompts_after/
-│       │   └── _51_hindsight_recall.py  # Enrich recall with Hindsight
-│       └── system_prompt/
-│           └── _30_hindsight_reflect.py # Inject reflect context into prompt
-├── prompts/
-│   ├── hindsight.retain_extract.sys.md  # Memory extraction prompt
-│   ├── hindsight.recall.md              # Recall injection template
-│   └── hindsight.reflect.md             # Reflect injection template
-├── webui/
-│   └── config.html                      # Settings UI
-└── README.md
-```
-
-## Configuration
-
-### Secrets (Settings → Secrets)
-
-| Key | Required | Default | Description |
-|-----|----------|---------|-------------|
-| `HINDSIGHT_BASE_URL` | No* | — | Hindsight server URL (e.g. `http://localhost:8888`). Set in plugin settings instead. |
-| `HINDSIGHT_API_KEY` | No | — | API key (optional for local servers) |
-
-*Note: `HINDSIGHT_BASE_URL` is configured in the plugin settings UI. Setting it in Secrets is deprecated but still supported for backwards compatibility.
-### Plugin Settings (Settings → Plugins → Hindsight → Configure)
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Explicit Bank ID | empty | Optional fixed bank override. Leave blank for project-derived banks. |
-| Bank ID Prefix | `a0` | Prefix used only when Explicit Bank ID is blank. |
-| Enable Chatlog Retain | `true` | Retain one structured conversation document after the final response. |
-| Retain Context | `conversation between Agent Zero and the user` | Context string sent with chatlog retain calls. |
-| Enable Solution Extraction | `false` | Optional utility-model extraction of reusable successful technical solutions. |
-| Solution Min Tool Calls | `1` | New tool result count required before solution extraction can run. |
-| Solution Min Characters | `1200` | New chatlog characters required before solution extraction can run. |
-| Solution History Window | `80000` | Max recent history characters sent to the utility model for solution extraction. |
-| Solution Context | `successful Agent Zero task outcome / reusable solution` | Context string sent with retained solution documents. |
-| Enable Recall | `true` | Run one Hindsight recall per user turn. |
-| Recall Max Tokens | `4096` | Max tokens for recall results. |
-| Recall Budget | `mid` | Compute budget for recall. |
-| Enable Reflect | `false` | Optional advanced reflect context injection. |
-| Reflect Budget | `low` | Compute budget for reflect when enabled. |
-| Reflect Max Tokens | `500` | Max tokens for reflect context when enabled. |
-| Cache TTL | `120` seconds | How long to cache reflect context when enabled. |
-| Operation Logging | `true` | Show one concise log entry per actual Hindsight API operation or gated solution extraction call. |
-| Debug Logging | `false` | Verbose lifecycle logging. |
-
-## Hindsight Companion Skill (Optional CLI Access)
-
-While the Hindsight plugin handles automatic lifecycle operations (retain, recall, reflect), you can also use the **Hindsight companion skill** for direct, opt-in CLI-style access to memory banks.
-
-### Loading the Skill
-
-```bash
-skills_tool:load hindsight
-```
-
-Once loaded, the skill provides:
-
-| Operation | Purpose |
-|-----------|----------|
-| **Retain** | Manually store information to a memory bank |
-| **Recall** | Manually search memories by query |
-| **Reflect** | Manually generate disposition-aware context |
-| **Inspect** | View memory bank contents and metadata |
-| **List** | List all memories in a bank |
-| **Export** | Export memories to file |
-| **Delete** | Remove specific memories |
-
-### When to Use the Skill
-
-- **Plugin alone**: Automatic background operation (good for hands-off memory management)
-- **Plugin + Skill**: Manual intervention when you need to:
-  - Query specific memories outside normal conversation flow
-  - Consolidate or reorganize memory banks
-  - Export memory data for inspection
-  - Troubleshoot or debug Hindsight service issues
-  - Trigger memory operations explicitly within agent workflows
-
-### Architecture
-
-The plugin and skill form a complementary pair:
-
-```
-┌─────────────────────────────────────┐
-│  Plugin (Automatic Lifecycle)       │
-├─────────────────────────────────────┤
-│ • Retain after each conversation   │
-│ • Recall during memory phase       │
-│ • Reflect into system prompt       │
-│ • Runs invisibly in background     │
-└─────────────────────────────────────┘
-         ↓         ↑
-  Hindsight Server
-         ↑         ↓
-┌─────────────────────────────────────┐
-│  Skill (Manual CLI Access)          │
-├─────────────────────────────────────┤
-│ • Query memories on demand         │
-│ • Manage memory banks explicitly   │
-│ • Export and analyze data          │
-│ • Requires explicit load command   │
-└─────────────────────────────────────┘
-```
-
-Both use the same Hindsight server and bank infrastructure—the plugin provides automatic operation, the skill provides manual control.
-
-
-## Hindsight Concepts
-
-| Concept | Description |
-|---------|-------------|
-| **Bank** | A memory container scoped by project context |
-| **Retain** | Store information as memories in a bank |
-| **Recall** | Semantic search across stored memories |
-| **Reflect** | Generate disposition-aware responses using stored knowledge |
-| **Disposition** | Personality traits (skepticism, literalism, empathy) that affect how reflect generates context |
+https://github.com/cstreil/a0_hindsight/tree/codex/hermes-style-chatlog-lifecycle
 
 ## Requirements
 
-- Agent Zero (with plugin system)
-- Python 3.12+
-- `hindsight-client` >= 0.4.0
-- A running Hindsight server (local Docker or hosted)
-
-## Links
-
-- [Hindsight GitHub](https://github.com/vectorize-io/hindsight)
-- [Vectorize.io](https://vectorize.io)
-- [Agent Zero](https://github.com/agent0ai/agent-zero)
+- Agent Zero with plugin support
+- `hindsight-client >= 0.4.0`
+- A running Hindsight server
 
 ## License
 
