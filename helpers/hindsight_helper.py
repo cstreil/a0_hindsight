@@ -1,64 +1,84 @@
 """
-Hindsight Integration Helper for Agent Zero
+Hindsight Integration Helper for Agent Zero.
 
-Handles Hindsight client management, memory retention,
-recall, and reflect operations for persistent memory augmentation.
-
-Uses async variants (aretain, arecall, areflect) since Agent Zero
-extensions run inside an async event loop.
+This helper keeps the integration close to Hermes' lifecycle model:
+one recall before a user turn is answered and one structured chatlog retain
+after the final response. It avoids utility-model memory extraction and does
+not create per-fragment memories.
 """
+import json
 import os
+import re
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, TYPE_CHECKING
+
 if TYPE_CHECKING:
     from agent import AgentContext
 
-# Add vendor directory to sys.path BEFORE importing hindsight_client
-# This allows the plugin to use hindsight-client from its own vendor/
-# directory instead of relying on system-wide pip installation (which is
-# ephemeral in Docker and lost on container restart).
 plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 vendor_dir = os.path.join(plugin_dir, "vendor")
-if vendor_dir not in sys.path:
-    sys.path.insert(0, vendor_dir)
+Hindsight = None  # type: ignore[assignment]
+HINDSIGHT_AVAILABLE = False
 
-try:
-    from hindsight_client import Hindsight
-    HINDSIGHT_AVAILABLE = True
-except ImportError:
-    # Do NOT auto-install at module import time — it blocks the main thread
-    # for up to 30s (GitHub #2 Bug 5). Let the init extension handle
-    # installation asynchronously instead.
-    import logging as _logging
-    _logging.getLogger(__name__).info(
-        "[Hindsight] hindsight_client not available at import time — "
-        "init extension will handle installation if needed."
-    )
-    HINDSIGHT_AVAILABLE = False
-    Hindsight = None  # type: ignore[assignment,misc]
 
-# Module-level caches
-_reflect_cache: Dict[str, tuple] = {}  # bank_id -> (timestamp, content)
+def _import_hindsight() -> bool:
+    """Import hindsight_client, preferring the runtime venv over vendored deps."""
+    global Hindsight, HINDSIGHT_AVAILABLE
+    if HINDSIGHT_AVAILABLE and Hindsight is not None:
+        return True
 
-# Default configuration values
+    try:
+        from hindsight_client import Hindsight as ImportedHindsight
+        Hindsight = ImportedHindsight
+        HINDSIGHT_AVAILABLE = True
+        return True
+    except ImportError:
+        pass
+
+    if os.path.isdir(vendor_dir) and vendor_dir not in sys.path:
+        # Fallback only. The vendored tree can be incomplete, so never let it
+        # shadow the Agent Zero runtime packages on normal imports.
+        sys.path.append(vendor_dir)
+    try:
+        from hindsight_client import Hindsight as ImportedHindsight
+        Hindsight = ImportedHindsight
+        HINDSIGHT_AVAILABLE = True
+        return True
+    except ImportError:
+        Hindsight = None  # type: ignore[assignment]
+        HINDSIGHT_AVAILABLE = False
+        return False
+
+
+_import_hindsight()
+
+_reflect_cache: Dict[str, tuple] = {}
+
 _DEFAULTS: Dict[str, Any] = {
-    "hindsight_bank_id": "",  # Explicit bank ID override; empty = use derived format (prefix-projectname)
+    "hindsight_bank_id": "",
     "hindsight_bank_prefix": "a0",
     "hindsight_retain_enabled": True,
     "hindsight_recall_enabled": True,
-    "hindsight_reflect_enabled": True,
+    "hindsight_reflect_enabled": False,
     "hindsight_recall_max_tokens": 4096,
     "hindsight_recall_budget": "mid",
     "hindsight_reflect_budget": "low",
     "hindsight_reflect_max_tokens": 500,
     "hindsight_cache_ttl": 120,
+    "hindsight_retain_context": "conversation between Agent Zero and the user",
     "hindsight_debug": False,
 }
 
+_GLOBAL_SETTINGS = {"hindsight_base_url", "hindsight_bank_prefix"}
+_SECRET_PATTERNS = [
+    re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)(bearer)\s+[a-z0-9._~+/=-]{16,}"),
+]
+
 
 def _log(context: Optional["AgentContext"], msg: str, log_type: str = "info") -> None:
-    """Log using A0's logging system via context.log."""
     try:
         if context and hasattr(context, "log"):
             context.log.log(type=log_type, heading=f"[Hindsight] {msg}")
@@ -68,60 +88,29 @@ def _log(context: Optional["AgentContext"], msg: str, log_type: str = "info") ->
         print(f"[Hindsight] {msg}")
 
 
-# Settings that are GLOBAL (shared across all projects)
-_GLOBAL_SETTINGS = {"hindsight_base_url", "hindsight_bank_prefix"}
-
-
 def _get_plugin_config(agent: Any) -> Dict[str, Any]:
-    """Read plugin settings with global/per-project merge.
-    
-    Global settings (hindsight_base_url, hindsight_bank_prefix) are always
-    read from the global (no-project) scope, then per-project settings are
-    layered on top. This ensures server connection info is shared while
-    feature toggles and operational settings can vary per project.
-    
-    Priority:
-    1. A0 framework get_plugin_config() (resolves project/agent scope)
-    2. Global config for global-only settings (base_url, bank_prefix)
-    3. Direct config.json file read (Docker-safe fallback)
-    4. _DEFAULTS only
-    """
-    config = {}
-    
-    # Try A0 framework config API first (requires valid agent reference)
+    config: Dict[str, Any] = {}
     if agent is not None:
         try:
             from helpers.plugins import get_plugin_config
-            # Read project-scoped config (all settings for this project)
             config = get_plugin_config("a0_hindsight", agent=agent) or {}
-            
-            # Always force global settings from global scope
-            # (base_url and bank_prefix must not vary per project)
             global_config = get_plugin_config("a0_hindsight", agent=agent, project_name="") or {}
             for key in _GLOBAL_SETTINGS:
                 if key in global_config:
                     config[key] = global_config[key]
         except Exception as e:
-            import traceback
             print(f"[HINDSIGHT DEBUG] _get_plugin_config() framework API failed: {type(e).__name__}: {e}")
             config = {}
-    
-    # Fallback: read config.json directly from plugin directory (Docker-persistent)
+
     if not config or not config.get("hindsight_base_url"):
         try:
-            import json
-            config_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "config.json"
-            )
+            config_path = os.path.join(plugin_dir, "config.json")
             if os.path.isfile(config_path):
                 with open(config_path, "r") as f:
                     file_config = json.load(f)
-                # Merge: file values only fill truly missing keys
-                # (not False booleans, which are valid user choices)
-                for k, v in file_config.items():
-                    if k not in config:
-                        config[k] = v
+                for key, value in file_config.items():
+                    if key not in config:
+                        config[key] = value
         except Exception as e:
             print(f"[HINDSIGHT DEBUG] _get_plugin_config() config.json fallback failed: {e}")
 
@@ -131,86 +120,26 @@ def _get_plugin_config(agent: Any) -> Dict[str, Any]:
     return config
 
 
+def _get_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def is_hindsight_client_available() -> bool:
-    """Runtime check for hindsight_client availability.
-    
-    Fast path: reads .dependency_status.json file created by hooks.py install().
-    Slow path: performs live import check if status file missing (self-healing).
-    
-    Returns True if hindsight_client is available, False otherwise.
-    """
-    import os
-    import json
-    
-    plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    status_file = os.path.join(plugin_dir, ".dependency_status.json")
-    
-    # Fast path: check cached status file from installation
-    if os.path.isfile(status_file):
-        try:
-            with open(status_file, "r") as f:
-                status = json.load(f)
-                if status.get("hindsight_client"):
-                    return True
-        except Exception:
-            pass
-    
-    # Slow path: live import check (status file missing or invalid)
-    # IMPORTANT: Don't trust the module-level HINDSIGHT_AVAILABLE variable
-    # because it was set at module load time and may be stale (cached from a
-    # previous Python session where hindsight_client was installed).
-    # Instead, perform a LIVE import check to verify the package is actually
-    # available in the current Python environment.
-    try:
-        from hindsight_client import Hindsight  # noqa: F401
-        available = True
-    except ImportError:
-        available = False
-    
+    available = _import_hindsight()
     if available:
-        # Self-heal: create the status file so future checks are instant
-        try:
-            status_data = {
-                "checked_at": _get_timestamp(),
-                "hindsight_client": True,
-                "warnings": ["auto-created by lazy init (hooks.install was not run)"],
-                "errors": [],
-            }
-            os.makedirs(plugin_dir, exist_ok=True)
-            with open(status_file, "w") as f:
-                json.dump(status_data, f, indent=2)
-        except Exception:
-            pass  # Status file creation failed, but hindsight_client is available
-    
+        _update_status_file_success()
     return available
 
 
-def _get_timestamp() -> str:
-    """Return current timestamp in ISO format."""
-    from datetime import datetime
-    return datetime.now().isoformat()
-
-
 def _update_status_file_success(context: Optional["AgentContext"] = None) -> None:
-    """Update .dependency_status.json to reflect successful installation.
-    
-    Called after auto-install succeeds, to update the status file so future
-    is_hindsight_client_available() checks use the fast path.
-    """
-    import os
-    import json
-    
     try:
-        plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         status_file = os.path.join(plugin_dir, ".dependency_status.json")
-        
         status_data = {
             "checked_at": _get_timestamp(),
             "hindsight_client": True,
             "warnings": [],
             "errors": [],
         }
-        os.makedirs(plugin_dir, exist_ok=True)
         with open(status_file, "w") as f:
             json.dump(status_data, f, indent=2)
     except Exception as e:
@@ -218,9 +147,7 @@ def _update_status_file_success(context: Optional["AgentContext"] = None) -> Non
             _log(context, f"Could not update status file: {e}", "warning")
 
 
-
 def _get_secret(key: str, default: str = "", context: Optional["AgentContext"] = None) -> str:
-    """Retrieve a secret value from A0 secrets manager."""
     try:
         from helpers.secrets import get_secrets_manager
         secrets_mgr = get_secrets_manager(context)
@@ -232,19 +159,9 @@ def _get_secret(key: str, default: str = "", context: Optional["AgentContext"] =
 
 
 def get_base_url(context: Optional["AgentContext"] = None, agent: Any = None) -> Optional[str]:
-    """Retrieve HINDSIGHT_BASE_URL with fallback chain.
-    
-    Priority order:
-    1. Environment variable HINDSIGHT_BASE_URL (recommended)
-    2. Plugin config hindsight_base_url (legacy, for migration)
-    3. None if neither is set
-    """
-    # First: check environment variable (recommended)
     url = os.environ.get("HINDSIGHT_BASE_URL", "").strip()
     if url:
         return url
-    
-    # Second: fallback to plugin config (for migration compatibility)
     try:
         config = _get_plugin_config(agent)
         url = config.get("hindsight_base_url", "").strip()
@@ -252,41 +169,31 @@ def get_base_url(context: Optional["AgentContext"] = None, agent: Any = None) ->
             return url
     except Exception as e:
         _log(context, f"Error reading plugin config: {e}", "debug")
-    
     return None
 
 
 def get_api_key(context: Optional["AgentContext"] = None) -> Optional[str]:
-    """Retrieve HINDSIGHT_API_KEY from A0 secrets (optional)."""
     key = _get_secret("HINDSIGHT_API_KEY", "", context)
     return key if key else None
 
 
 def is_configured(context: Optional["AgentContext"] = None) -> bool:
-    """Check if Hindsight SDK is available and base URL is set."""
-    if not HINDSIGHT_AVAILABLE:
+    if not is_hindsight_client_available():
         return False
     agent = getattr(context, "agent0", None) if context else None
     return bool(get_base_url(context, agent))
 
 
 def get_client(context: Optional["AgentContext"] = None) -> Optional[Any]:
-    """Create a fresh Hindsight client for this call.
-    
-    A new client is created each time to avoid stale aiohttp ClientSession
-    issues across different async contexts or event loops (see GitHub #1).
-    """
-    if not HINDSIGHT_AVAILABLE:
+    if not is_hindsight_client_available() or Hindsight is None:
         return None
 
     agent = getattr(context, "agent0", None) if context else None
     base_url = get_base_url(context, agent)
     if not base_url:
-        print(f"[HINDSIGHT DEBUG] get_client(): base_url is None. agent={agent is not None}, env={bool(os.environ.get('HINDSIGHT_BASE_URL'))}")
         return None
 
     api_key = get_api_key(context)
-
     try:
         kwargs: Dict[str, Any] = {"base_url": base_url}
         if api_key:
@@ -299,54 +206,138 @@ def get_client(context: Optional["AgentContext"] = None) -> Optional[Any]:
         return None
 
 
-def get_bank_id(context: "AgentContext") -> str:
-    """Derive a Hindsight bank ID from the agent context.
+def close_client(client: Any) -> None:
+    try:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    except Exception:
+        pass
 
-    Uses the bank prefix + project name (if active) for memory isolation.
-    Always uses the actual project name when a project is active,
-    even if the project has no per-project settings defined.
-    Only falls back to prefix + 'default' when no project is active at all.
-    
-    If hindsight_bank_id is explicitly set in config, that takes priority.
-    """
+
+def get_bank_id(context: "AgentContext") -> str:
     agent0 = getattr(context, "agent0", None)
     config = _get_plugin_config(agent0)
-    
-    # Explicit override takes priority
     explicit_id = config.get("hindsight_bank_id", "").strip()
     if explicit_id:
         return explicit_id
-    
-    prefix = config.get("hindsight_bank_prefix", "a0")
 
-    # Resolve project name using the framework's context data.
-    # This always returns the active project name when one is active,
-    # even if the project has no per-project plugin settings defined.
+    prefix = config.get("hindsight_bank_prefix", "a0")
     project_name = None
     try:
         from helpers.projects import get_context_project_name
         project_name = get_context_project_name(context)
     except Exception:
         pass
-
-    # Fallback: try context.project.name (less reliable)
     if not project_name:
         try:
             if hasattr(context, "project") and context.project:
                 project_name = getattr(context.project, "name", None)
         except Exception:
             pass
-
     if project_name:
         return f"{prefix}-{project_name}"
     return f"{prefix}-default"
 
 
-async def retain_memory(context: "AgentContext", content: str, metadata: Optional[Dict[str, str]] = None) -> bool:
-    """Store a memory in Hindsight via async retain."""
+def _redact_secrets(text: str) -> str:
+    redacted = text
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+    return redacted
+
+
+def _output_message_text(message: Dict[str, Any]) -> str:
+    from helpers.history import output_text
+    return output_text([message], ai_label="assistant", human_label="user").strip()
+
+
+def _is_tool_result(message: Dict[str, Any]) -> bool:
+    content = message.get("content")
+    return isinstance(content, dict) and "tool_name" in content and "tool_result" in content
+
+
+def build_chatlog(agent: Any) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for message in agent.history.output():
+        if _is_tool_result(message):
+            continue
+        text = _redact_secrets(_output_message_text(message))
+        if not text:
+            continue
+        entries.append({
+            "role": "assistant" if message.get("ai") else "user",
+            "content": text[:12000],
+            "timestamp": _get_timestamp(),
+        })
+    return entries
+
+
+def build_metadata(context: "AgentContext", agent: Any, message_count: int) -> Dict[str, str]:
+    metadata = {
+        "framework": "agent-zero",
+        "session_id": str(getattr(context, "id", "")),
+        "agent_name": str(getattr(agent, "agent_name", "")),
+        "agent_profile": str(getattr(getattr(agent, "config", None), "profile", "")),
+        "message_count": str(message_count),
+        "retained_at": _get_timestamp(),
+    }
+    try:
+        from helpers.projects import get_context_project_name
+        project_name = get_context_project_name(context)
+        if project_name:
+            metadata["project"] = str(project_name)
+    except Exception:
+        pass
+    return {key: value for key, value in metadata.items() if value}
+
+
+async def retain_chatlog(context: "AgentContext", agent: Any) -> bool:
     if not is_configured(context):
         return False
 
+    config = _get_plugin_config(agent)
+    if not config.get("hindsight_retain_enabled", True):
+        return False
+
+    chatlog = build_chatlog(agent)
+    if not chatlog:
+        return False
+
+    client = get_client(context)
+    if not client:
+        return False
+
+    bank_id = get_bank_id(context)
+    document_id = f"agent-zero:{getattr(context, 'id', 'default')}"
+    item = {
+        "content": json.dumps(chatlog, ensure_ascii=False),
+        "context": config.get("hindsight_retain_context") or _DEFAULTS["hindsight_retain_context"],
+        "metadata": build_metadata(context, agent, len(chatlog)),
+        "tags": ["agent-zero", "chatlog"],
+    }
+
+    try:
+        await client.aretain_batch(
+            bank_id=bank_id,
+            items=[item],
+            document_id=document_id,
+            document_tags=["agent-zero", "chatlog"],
+            retain_async=True,
+        )
+        if config.get("hindsight_debug", False):
+            _log(context, f"Retained chatlog to bank '{bank_id}' as '{document_id}'", "util")
+        return True
+    except Exception as e:
+        _log(context, f"Retain chatlog error: {e}", "error")
+        return False
+    finally:
+        close_client(client)
+
+
+async def retain_memory(context: "AgentContext", content: str, metadata: Optional[Dict[str, str]] = None) -> bool:
+    if not is_configured(context):
+        return False
     agent0 = getattr(context, "agent0", None)
     config = _get_plugin_config(agent0)
     if not config.get("hindsight_retain_enabled", True):
@@ -357,27 +348,44 @@ async def retain_memory(context: "AgentContext", content: str, metadata: Optiona
         return False
 
     bank_id = get_bank_id(context)
-
     try:
         kwargs: Dict[str, Any] = {
             "bank_id": bank_id,
-            "content": content[:10000],  # Limit content size
+            "content": _redact_secrets(content)[:10000],
+            "context": config.get("hindsight_retain_context"),
+            "tags": ["agent-zero", "manual"],
         }
         if metadata:
             kwargs["metadata"] = metadata
-
         await client.aretain(**kwargs)
-
-        if config.get("hindsight_debug", False):
-            _log(context, f"Retained memory to bank '{bank_id}': {content[:80]}...", "util")
         return True
     except Exception as e:
         _log(context, f"Retain error: {e}", "error")
         return False
+    finally:
+        close_client(client)
+
+
+def _format_recall_result(result: Any) -> Optional[str]:
+    if hasattr(result, "results"):
+        results = getattr(result, "results", None) or []
+        lines = []
+        for idx, item in enumerate(results, 1):
+            text = getattr(item, "text", None) or getattr(item, "content", None) or str(item)
+            text = text.strip()
+            if text:
+                lines.append(f"{idx}. {text}")
+        return "\n".join(lines) if lines else None
+
+    for attr in ("content", "text", "response"):
+        value = getattr(result, attr, None)
+        if value:
+            return str(value)
+    result_str = str(result)
+    return result_str if result_str and result_str != "None" else None
 
 
 async def recall_memories(context: "AgentContext", query: str) -> Optional[str]:
-    """Search Hindsight memories via async recall."""
     if not is_configured(context):
         return None
 
@@ -386,72 +394,44 @@ async def recall_memories(context: "AgentContext", query: str) -> Optional[str]:
     if not config.get("hindsight_recall_enabled", True):
         return None
 
+    safe_query = query.strip()[:1500] if query else ""
+    if len(safe_query) < 3:
+        return None
+
     client = get_client(context)
     if not client:
         return None
     bank_id = get_bank_id(context)
 
     try:
-        # Validate and truncate query before sending
-        # Hindsight service enforces a 500-token query limit.
-        # ~1500 chars is safely under 500 tokens for most tokenizers (GitHub #1 Bug 3).
-        if not query or not query.strip():
-            _log(context, "Recall query is empty after validation", "debug")
-            return None
-        
-        safe_query = query.strip()[:1500]
-        
         result = await client.arecall(
             bank_id=bank_id,
             query=safe_query,
             max_tokens=config.get("hindsight_recall_max_tokens", 4096),
             budget=config.get("hindsight_recall_budget", "mid"),
         )
-
-        # Extract text content from recall response
-        if hasattr(result, "content") and result.content:
-            return result.content
-        elif hasattr(result, "text") and result.text:
-            return result.text
-        elif hasattr(result, "facts") and result.facts:
-            # Format facts into readable text
-            facts_text = []
-            for fact in result.facts:
-                if hasattr(fact, "content"):
-                    facts_text.append(fact.content)
-                elif hasattr(fact, "text"):
-                    facts_text.append(fact.text)
-                else:
-                    facts_text.append(str(fact))
-            return "\n".join(facts_text) if facts_text else None
-        else:
-            # Try converting to string as last resort
-            result_str = str(result)
-            return result_str if result_str and result_str != "None" else None
-
+        return _format_recall_result(result)
     except Exception as e:
         error_msg = str(e)
-        # Log more detailed error info for debugging
         if "400" in error_msg or "Bad Request" in error_msg:
             _log(context, f"Recall 400 Bad Request: {error_msg[:200]}. Query length: {len(query) if query else 0}. Bank: {bank_id}", "warning")
         else:
             _log(context, f"Recall error: {error_msg}", "error")
         return None
+    finally:
+        close_client(client)
 
 
 async def reflect_context(context: "AgentContext", query: str) -> Optional[str]:
-    """Generate disposition-aware context from Hindsight via async reflect."""
     if not is_configured(context):
         return None
 
     agent0 = getattr(context, "agent0", None)
     config = _get_plugin_config(agent0)
-    if not config.get("hindsight_reflect_enabled", True):
+    if not config.get("hindsight_reflect_enabled", False):
         return None
 
     bank_id = get_bank_id(context)
-
-    # Check cache
     cache_key = f"{bank_id}:{getattr(context, 'id', 'default')}"
     cache_ttl = config.get("hindsight_cache_ttl", 120)
     if cache_key in _reflect_cache:
@@ -459,56 +439,44 @@ async def reflect_context(context: "AgentContext", query: str) -> Optional[str]:
         if time.time() - cached_time < cache_ttl:
             return cached_content
 
+    safe_query = query.strip()[:1500] if query else ""
+    if not safe_query:
+        return None
+
     client = get_client(context)
     if not client:
         return None
 
     try:
-        # Truncate query to stay within Hindsight's 500-token query limit (GitHub #1 Bug 3)
-        safe_query = query.strip()[:1500] if query else ""
-        if not safe_query:
-            return None
-        
         result = await client.areflect(
             bank_id=bank_id,
             query=safe_query,
             budget=config.get("hindsight_reflect_budget", "low"),
             max_tokens=config.get("hindsight_reflect_max_tokens", 500),
         )
-
-        content = None
-        if hasattr(result, "content") and result.content:
-            content = result.content
-        elif hasattr(result, "text") and result.text:
-            content = result.text
-        elif hasattr(result, "response") and result.response:
-            content = result.response
-        else:
+        content = getattr(result, "content", None) or getattr(result, "text", None) or getattr(result, "response", None)
+        if not content:
             result_str = str(result)
-            if result_str and result_str != "None":
-                content = result_str
-
+            content = result_str if result_str and result_str != "None" else None
         _reflect_cache[cache_key] = (time.time(), content)
         return content
-
     except Exception as e:
         _log(context, f"Reflect error: {e}", "error")
         return None
+    finally:
+        close_client(client)
 
 
 def clear_cache(bank_id: Optional[str] = None) -> None:
-    """Clear cached reflect contexts."""
     global _reflect_cache
     if bank_id:
-        keys_to_remove = [k for k in _reflect_cache if k.startswith(f"{bank_id}:")]
-        for k in keys_to_remove:
-            del _reflect_cache[k]
+        for key in [k for k in _reflect_cache if k.startswith(f"{bank_id}:")]:
+            del _reflect_cache[key]
     else:
         _reflect_cache = {}
 
 
 def cleanup(context: Optional["AgentContext"] = None) -> None:
-    """Cleanup caches for a specific context or all."""
     if context:
         bank_id = get_bank_id(context)
         clear_cache(bank_id)

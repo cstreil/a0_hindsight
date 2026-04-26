@@ -17,18 +17,25 @@ Augments Agent Zero's built-in memory with [Hindsight](https://github.com/vector
 ## How It Works
 
 ```
-┌─────────────┐     retain        ┌──────────────┐     reflect       ┌──────────────┐
-│  Agent Zero  │ ───────────────▶  │  Hindsight   │ ───────────────▶  │  Disposition  │
-│  (your chat) │                   │  (memory)    │   context gen     │  (insights)   │
-└──────┬───────┘                   └──────┬───────┘                   └──────────────┘
-       │                                  │
-       │◀──── recall + reflect ───────────┘
-       │      (system prompt injection)
+┌─────────────┐     recall once      ┌──────────────┐
+│ Agent Zero  │ ◀────────────────── │  Hindsight   │
+│ user turn   │                     │ memory bank  │
+└──────┬──────┘                     └──────┬───────┘
+       │                                   │
+       │ fenced temporary context          │
+       ▼                                   │
+┌─────────────┐                            │
+│ LLM answer  │                            │
+└──────┬──────┘                            │
+       │ one structured chatlog retain     │
+       └──────────────────────────────────▶│
 ```
 
-1. **Retain** — After each conversation turn, key facts and information are extracted and stored in Hindsight via the `monologue_end` extension
-2. **Recall** — On each recall cycle, Hindsight is queried alongside the built-in memory for enriched semantic search results
-3. **Reflect** — Hindsight generates disposition-aware context that is injected into the system prompt
+1. **Recall** — Once per user turn, Hindsight is queried from the clean user message and injected as fenced temporary context.
+2. **Retain** — After the final response, the conversation is retained as one structured chatlog document via `retain_batch` with a stable `document_id`.
+3. **Reflect** — Optional advanced mode. Disabled by default for the lean lifecycle.
+
+The plugin no longer calls a utility model to create individual memory fragments during retain. Hindsight may still display individual facts in the bank because it extracts facts internally from the retained chatlog document.
 
 ## Installation
 
@@ -120,16 +127,18 @@ hindsight/
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Bank ID Prefix | `a0` | Prefix for memory bank IDs |
-| Enable Retain | `true` | Store memories to Hindsight |
-| Enable Recall | `true` | Enrich recall with Hindsight search |
-| Enable Reflect | `true` | Inject reflect context into prompt |
-| Recall Max Tokens | `4096` | Max tokens for recall results |
-| Recall Budget | `mid` | Compute budget for recall |
-| Reflect Budget | `low` | Compute budget for reflect |
-| Reflect Max Tokens | `500` | Max tokens for reflect context |
-| Cache TTL | `120` seconds | How long to cache reflect context |
-| Debug Logging | `false` | Verbose logging |
+| Explicit Bank ID | empty | Optional fixed bank override. Leave blank for project-derived banks. |
+| Bank ID Prefix | `a0` | Prefix used only when Explicit Bank ID is blank. |
+| Enable Chatlog Retain | `true` | Retain one structured conversation document after the final response. |
+| Retain Context | `conversation between Agent Zero and the user` | Context string sent with chatlog retain calls. |
+| Enable Recall | `true` | Run one Hindsight recall per user turn. |
+| Recall Max Tokens | `4096` | Max tokens for recall results. |
+| Recall Budget | `mid` | Compute budget for recall. |
+| Enable Reflect | `false` | Optional advanced reflect context injection. |
+| Reflect Budget | `low` | Compute budget for reflect when enabled. |
+| Reflect Max Tokens | `500` | Max tokens for reflect context when enabled. |
+| Cache TTL | `120` seconds | How long to cache reflect context when enabled. |
+| Debug Logging | `false` | Verbose lifecycle logging. |
 
 ## Hindsight Companion Skill (Optional CLI Access)
 

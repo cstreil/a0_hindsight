@@ -48,17 +48,20 @@ class HindsightInit(Extension):
 
             client = hindsight_helper.get_client(context)
             if client:
-                bank_id = hindsight_helper.get_bank_id(context)
-                hindsight_helper._log(
-                    context,
-                    f"Integration enabled for bank: {bank_id}",
-                    "util",
-                )
+                try:
+                    bank_id = hindsight_helper.get_bank_id(context)
+                    hindsight_helper._log(
+                        context,
+                        f"Integration enabled for bank: {bank_id}",
+                        "util",
+                    )
 
-                if not hasattr(context, "_hindsight"):
-                    context._hindsight = {}
-                context._hindsight["enabled"] = True
-                context._hindsight["bank_id"] = bank_id
+                    if not hasattr(context, "_hindsight"):
+                        context._hindsight = {}
+                    context._hindsight["enabled"] = True
+                    context._hindsight["bank_id"] = bank_id
+                finally:
+                    hindsight_helper.close_client(client)
         except Exception as e:
             hindsight_helper._log(context, f"Init error: {e}", "error")
 

@@ -1,6 +1,6 @@
 name: a0_hindsight
 title: Hindsight Memory
-description: Augments Agent Zero's memory with Hindsight semantic search and disposition-aware context generation.
+description: Adds Hermes-style Hindsight recall and structured chatlog retention to Agent Zero.
 version: 2.4.3
 settings_sections:
   - agent

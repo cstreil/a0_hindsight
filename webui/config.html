@@ -7,27 +7,23 @@
     <div x-data>
         <template x-if="config">
             <div>
-                <!-- ===== GLOBAL SETTINGS ===== -->
-                <div class="section-title">Hindsight Server Configuration</div>
+                <div class="section-title">Hindsight Memory Lifecycle</div>
                 <div class="section-description">
-                    Augments Agent Zero's memory with
-                    <a href="https://github.com/vectorize-io/hindsight" target="_blank">Hindsight</a>
-                    by Vectorize.io. Retains, recalls, and reflects on memories
-                    using semantic search and disposition-aware context.
+                    Adds a lean Hindsight memory layer to Agent Zero: one recall before a user turn is answered,
+                    then one structured chatlog retain after the final response. The recalled context is fenced and
+                    injected as temporary background context, not stored in Agent Zero history.
                 </div>
 
                 <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--accent, #6c63ff);">
-                    <strong>⚙️ Global Settings</strong> — These apply to all projects.
-                    Switch to <strong>Default</strong> or any project to configure per-project settings below.
+                    <strong>Server and Bank</strong> - Connection settings and memory-bank selection.
                 </div>
 
                 <div class="field">
                     <div class="field-label">
                         <div class="field-title">Hindsight Base URL</div>
                         <div class="field-description">
-                            The URL where your Hindsight server is running.
-                            This setting is global — shared across all projects.
-                            Example: <code>http://localhost:8888</code> or <code>http://192.168.1.100:8888</code>
+                            URL of the running Hindsight API server. Example: <code>http://100.107.17.69:8888</code>.
+                            This is shared across projects unless overridden by <code>HINDSIGHT_BASE_URL</code>.
                         </div>
                     </div>
                     <div class="field-control">
@@ -39,11 +35,25 @@
 
                 <div class="field">
                     <div class="field-label">
+                        <div class="field-title">Explicit Bank ID</div>
+                        <div class="field-description">
+                            Use a specific Hindsight bank. For testing this should be <code>memento-test</code>.
+                            Leave blank only if you want project-derived banks.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="text"
+                               x-model="config.hindsight_bank_id"
+                               placeholder="memento-test" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
                         <div class="field-title">Bank ID Prefix</div>
                         <div class="field-description">
-                            Prefix for Hindsight memory bank IDs.
-                            Combined with project name for isolation.
-                            This setting is global — shared across all projects.
+                            Used only when Explicit Bank ID is blank. The derived bank is prefix plus project name,
+                            or prefix plus <code>default</code> when no project is active.
                         </div>
                     </div>
                     <div class="field-control">
@@ -53,35 +63,18 @@
                     </div>
                 </div>
 
-                <!-- ===== PER-PROJECT SETTINGS ===== -->
                 <div style="margin-top: 1.5rem;"></div>
-
                 <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--success, #4caf50);">
-                    <strong>📁 Per-Project Settings</strong> — Use the project selector above to switch between
-                    <strong>Default</strong> (fallback for all projects) and individual project overrides.
+                    <strong>Structured Chatlog Retain</strong> - Stores one structured conversation document with a stable
+                    <code>document_id</code>, similar to the Hermes integration.
                 </div>
 
                 <div class="field">
                     <div class="field-label">
-                        <div class="field-title">Explicit Bank ID Override</div>
+                        <div class="field-title">Enable Chatlog Retain</div>
                         <div class="field-description">
-                            Leave blank to auto-derive bank ID from prefix + project name.
-                            Set to a specific name (e.g., "Agent0") to use that bank instead of derived format.
-                            Per-project: each project can use a different bank.
-                        </div>
-                    </div>
-                    <div class="field-control">
-                        <input type="text"
-                               x-model="config.hindsight_bank_id"
-                               placeholder="Leave blank for auto-derivation" />
-                    </div>
-                </div>
-
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Enable Retain</div>
-                        <div class="field-description">
-                            Store conversation memories to Hindsight after each interaction.
+                            After the final response, retain the conversation as one structured chatlog via
+                            <code>retain_batch</code>. This does not call a utility LLM and does not write per-fragment memories.
                         </div>
                     </div>
                     <div class="field-control">
@@ -95,31 +88,36 @@
 
                 <div class="field">
                     <div class="field-label">
+                        <div class="field-title">Retain Context</div>
+                        <div class="field-description">
+                            Context string sent with each structured chatlog retain. Keep this descriptive; it guides
+                            Hindsight's extraction from the chatlog.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="text"
+                               x-model="config.hindsight_retain_context"
+                               placeholder="conversation between Agent Zero and the user" />
+                    </div>
+                </div>
+
+                <div style="margin-top: 1.5rem;"></div>
+                <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--success, #4caf50);">
+                    <strong>Recall Injection</strong> - Searches Hindsight once per user turn and injects fenced temporary context.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
                         <div class="field-title">Enable Recall</div>
                         <div class="field-description">
-                            Enrich memory recall with Hindsight semantic search results.
+                            Run one Hindsight recall from the clean user message before the LLM call. Results are injected
+                            into <code>&lt;memory-context&gt;</code> as background information.
                         </div>
                     </div>
                     <div class="field-control">
                         <label class="toggle">
                             <input type="checkbox"
                                    x-model="config.hindsight_recall_enabled" />
-                            <span class="toggler"></span>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Enable Reflect</div>
-                        <div class="field-description">
-                            Inject disposition-aware context from Hindsight into the system prompt.
-                        </div>
-                    </div>
-                    <div class="field-control">
-                        <label class="toggle">
-                            <input type="checkbox"
-                                   x-model="config.hindsight_reflect_enabled" />
                             <span class="toggler"></span>
                         </label>
                     </div>
@@ -143,7 +141,7 @@
                     <div class="field-label">
                         <div class="field-title">Recall Budget</div>
                         <div class="field-description">
-                            Compute budget for recall: low, mid, or high.
+                            Hindsight recall budget: <code>low</code>, <code>mid</code>, or <code>high</code>.
                         </div>
                     </div>
                     <div class="field-control">
@@ -155,47 +153,71 @@
                     </div>
                 </div>
 
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Reflect Budget</div>
-                        <div class="field-description">
-                            Compute budget for reflect: low, mid, or high.
-                        </div>
-                    </div>
-                    <div class="field-control">
-                        <select x-model="config.hindsight_reflect_budget">
-                            <option value="low">Low</option>
-                            <option value="mid">Mid</option>
-                            <option value="high">High</option>
-                        </select>
-                    </div>
+                <div style="margin-top: 1.5rem;"></div>
+                <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--warning, #ff9800);">
+                    <strong>Advanced: Reflect</strong> - Optional and disabled by default. The current recommended setup uses
+                    recall plus structured chatlog retain only.
                 </div>
 
                 <div class="field">
                     <div class="field-label">
-                        <div class="field-title">Reflect Max Tokens</div>
+                        <div class="field-title">Enable Reflect</div>
                         <div class="field-description">
-                            Maximum tokens for the injected reflect context.
+                            Optional system-prompt reflect context. Leave disabled for the lean Hermes-style lifecycle.
                         </div>
                     </div>
                     <div class="field-control">
-                        <input type="number"
-                               x-model.number="config.hindsight_reflect_max_tokens"
-                               placeholder="500" />
+                        <label class="toggle">
+                            <input type="checkbox"
+                                   x-model="config.hindsight_reflect_enabled" />
+                            <span class="toggler"></span>
+                        </label>
                     </div>
                 </div>
 
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Context Cache TTL (seconds)</div>
-                        <div class="field-description">
-                            How long to cache Hindsight reflect context before refreshing.
+                <div x-show="config.hindsight_reflect_enabled">
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Reflect Budget</div>
+                            <div class="field-description">
+                                Hindsight reflect budget: <code>low</code>, <code>mid</code>, or <code>high</code>.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <select x-model="config.hindsight_reflect_budget">
+                                <option value="low">Low</option>
+                                <option value="mid">Mid</option>
+                                <option value="high">High</option>
+                            </select>
                         </div>
                     </div>
-                    <div class="field-control">
-                        <input type="number"
-                               x-model.number="config.hindsight_cache_ttl"
-                               placeholder="120" />
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Reflect Max Tokens</div>
+                            <div class="field-description">
+                                Maximum tokens for injected reflect context.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_reflect_max_tokens"
+                                   placeholder="500" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Reflect Cache TTL (seconds)</div>
+                            <div class="field-description">
+                                How long to cache reflect context before refreshing.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_cache_ttl"
+                                   placeholder="120" />
+                        </div>
                     </div>
                 </div>
 
@@ -203,7 +225,7 @@
                     <div class="field-label">
                         <div class="field-title">Debug Logging</div>
                         <div class="field-description">
-                            Enable verbose logging for troubleshooting.
+                            Enable extra Hindsight lifecycle logs for troubleshooting.
                         </div>
                     </div>
                     <div class="field-control">
@@ -216,11 +238,10 @@
                 </div>
 
                 <div class="section-description" style="margin-top: 1rem; opacity: 0.7;">
-                    <strong>Note:</strong> <code>HINDSIGHT_BASE_URL</code> and <code>Bank ID Prefix</code> are global settings
-                    shared across all projects. All other settings can be configured per-project using the
-                    project selector above. The <strong>Default</strong> project provides fallback values for
-                    projects without explicit overrides.
-                    <code>HINDSIGHT_API_KEY</code> is optional for local servers and can be set in <strong>Settings → Secrets</strong>.
+                    <strong>Note:</strong> The lean lifecycle does not expose Hindsight tools and does not call a utility LLM
+                    to extract memory fragments. Hindsight will still show individual facts in its bank because it extracts
+                    them internally from the retained chatlog document. <code>HINDSIGHT_API_KEY</code> is optional for local
+                    servers and can be set in <strong>Settings -> Secrets</strong>.
                 </div>
             </div>
         </template>

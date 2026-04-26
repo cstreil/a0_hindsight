@@ -1,9 +1,9 @@
 """
-Hindsight Recall Extension
-Enriches memory recall with Hindsight semantic search results.
+Hermes-style Hindsight recall extension.
 
-Runs at priority _51 (after _50_recall_memories from core memory plugin).
-Injects Hindsight recall results into the agent's extras for system prompt.
+Runs at most once per user turn and injects recalled memory as ephemeral,
+fenced context. It does not persist recalled memory in Agent Zero history or
+reuse it across tool-loop iterations.
 """
 
 import asyncio
@@ -11,17 +11,15 @@ import os
 import sys
 from helpers.extension import Extension
 from agent import LoopData
-from helpers import errors, plugins
+from helpers import errors
 
-# Fix import path for hindsight plugin helpers
-# Add /a0 to sys.path so that 'usr.plugins.a0_hindsight' can be resolved
 plugin_base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 if plugin_base not in sys.path:
     sys.path.insert(0, plugin_base)
 
 from usr.plugins.a0_hindsight.helpers import hindsight_helper
 
-SEARCH_TIMEOUT = 30
+SEARCH_TIMEOUT = 20
 
 
 class HindsightRecall(Extension):
@@ -33,10 +31,6 @@ class HindsightRecall(Extension):
         context = self.agent.context
         if not hasattr(context, "agent0"):
             return
-        # Check if hindsight_client is available before proceeding
-        if not hindsight_helper.is_hindsight_client_available():
-            return
-
         if not hindsight_helper.is_configured(context):
             return
 
@@ -44,70 +38,49 @@ class HindsightRecall(Extension):
         if not config.get("hindsight_recall_enabled", True):
             return
 
-        # Get the core memory plugin's recall interval setting
-        core_config = plugins.get_plugin_config("_memory", self.agent) or {}
-        interval = core_config.get("memory_recall_interval", 3)
-
-        # Only run on the same iterations as the core recall
-        # Clear stale memories on skip iterations (GitHub #2 Bug 3)
-        if loop_data.iteration % interval != 0:
-            loop_data.extras_persistent.pop("hindsight_memories", None)
+        user_message = loop_data.user_message
+        user_key = getattr(user_message, "id", None) or (
+            user_message.output_text() if user_message else ""
+        )
+        if not user_key:
             return
 
-        log_item = self.agent.context.log.log(
-            type="util",
-            heading="Searching Hindsight memories...",
-        )
+        state = getattr(context, "_hindsight", None)
+        if state is None:
+            context._hindsight = {}
+            state = context._hindsight
+        if state.get("last_recall_user_key") == user_key:
+            return
+        state["last_recall_user_key"] = user_key
+
+        log_item = context.log.log(type="util", heading="Searching Hindsight memories...")
 
         try:
-            # Build query from user message and recent history
-            user_instruction = (
-                loop_data.user_message.output_text() if loop_data.user_message else ""
-            )
-            history_len = core_config.get("memory_recall_history_len", 10000)
-            history = self.agent.history.output_text()[-history_len:] if self.agent.history else ""
-            
-            # Build query: prioritize user instruction, fallback to history, ensure non-empty
-            query = user_instruction.strip() if user_instruction else ""
-            if not query and history:
-                query = history.strip()
-            
-            # Truncate query to stay within Hindsight's 500-token query limit
-            # ~1500 chars is safely under 500 tokens for most tokenizers (GitHub #1 Bug 3)
-            if query:
-                query = query[:1500]
-            
-            # Validate query is not empty or too short
-            if not query or len(query.strip()) < 3:
-                log_item.update(heading="Insufficient query for Hindsight recall (need at least 3 chars)")
+            query = user_message.output_text().strip() if user_message else ""
+            if len(query) < 3:
+                log_item.update(heading="Insufficient query for Hindsight recall")
                 return
 
-            recall_result = await hindsight_helper.recall_memories(context, query)
+            recall_result = await asyncio.wait_for(
+                hindsight_helper.recall_memories(context, query),
+                timeout=SEARCH_TIMEOUT,
+            )
 
             if recall_result and recall_result.strip():
-                log_item.update(
-                    heading="Hindsight memories found",
-                    content=recall_result[:500],
-                )
-
-                # Inject into extras for system prompt
-                extras = loop_data.extras_persistent
+                log_item.update(heading="Hindsight memories found", content=recall_result[:500])
                 hindsight_prompt = self.agent.read_prompt(
                     "hindsight.recall.md",
                     hindsight_memories=recall_result,
                 )
-                extras["hindsight_memories"] = hindsight_prompt
+                loop_data.extras_temporary["hindsight_memories"] = hindsight_prompt
             else:
                 log_item.update(heading="No Hindsight memories found")
-                # Clear stale memories when recall finds nothing (GitHub #2 Bug 3)
-                loop_data.extras_persistent.pop("hindsight_memories", None)
 
         except asyncio.TimeoutError:
             log_item.update(heading="Hindsight recall timed out")
         except Exception as e:
-            err = errors.format_error(e)
-            self.agent.context.log.log(
+            context.log.log(
                 type="warning",
                 heading="Hindsight recall extension error",
-                content=err,
+                content=errors.format_error(e),
             )
