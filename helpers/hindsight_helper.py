@@ -6,6 +6,7 @@ one recall before a user turn is answered and one structured chatlog retain
 after the final response. It avoids utility-model memory extraction and does
 not create per-fragment memories.
 """
+import hashlib
 import json
 import os
 import re
@@ -68,17 +69,39 @@ _DEFAULTS: Dict[str, Any] = {
     "hindsight_reflect_max_tokens": 500,
     "hindsight_cache_ttl": 120,
     "hindsight_retain_context": "conversation between Agent Zero and the user",
+    "hindsight_retain_min_messages": 3,
+    "hindsight_retain_min_chars": 800,
+    "hindsight_operation_logging": True,
+    "hindsight_solution_extract_enabled": False,
+    "hindsight_solution_extract_min_tool_calls": 1,
+    "hindsight_solution_extract_min_chars": 1200,
+    "hindsight_solution_extract_max_history_chars": 80000,
+    "hindsight_solution_context": "successful Agent Zero task outcome / reusable solution",
     "hindsight_debug": False,
 }
 
 _GLOBAL_SETTINGS = {"hindsight_base_url", "hindsight_bank_prefix"}
 _SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd)\s*\(([^)\s]{12,})\)"),
     re.compile(r"(?i)(bearer)\s+[a-z0-9._~+/=-]{16,}"),
+    re.compile(r"\b(am_[a-zA-Z0-9_]{24,})\b"),
 ]
 
 
-def _log(context: Optional["AgentContext"], msg: str, log_type: str = "info") -> None:
+def _debug_enabled(context: Optional["AgentContext"] = None) -> bool:
+    agent = getattr(context, "agent0", None) if context else None
+    return bool(_get_plugin_config(agent).get("hindsight_debug", False))
+
+
+def _log(
+    context: Optional["AgentContext"],
+    msg: str,
+    log_type: str = "info",
+    debug_only: bool = False,
+) -> None:
+    if debug_only and not _debug_enabled(context):
+        return
     try:
         if context and hasattr(context, "log"):
             context.log.log(type=log_type, heading=f"[Hindsight] {msg}")
@@ -198,9 +221,7 @@ def get_client(context: Optional["AgentContext"] = None) -> Optional[Any]:
         kwargs: Dict[str, Any] = {"base_url": base_url}
         if api_key:
             kwargs["api_key"] = api_key
-        client = Hindsight(**kwargs)
-        _log(context, f"Connected to Hindsight at: {base_url}", "util")
-        return client
+        return Hindsight(**kwargs)
     except Exception as e:
         _log(context, f"Client creation error: {e}", "error")
         return None
@@ -243,7 +264,11 @@ def get_bank_id(context: "AgentContext") -> str:
 def _redact_secrets(text: str) -> str:
     redacted = text
     for pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+        def repl(match):
+            if match.lastindex and match.lastindex >= 2:
+                return f"{match.group(1)}=[REDACTED]"
+            return "[REDACTED]"
+        redacted = pattern.sub(repl, redacted)
     return redacted
 
 
@@ -255,6 +280,22 @@ def _output_message_text(message: Dict[str, Any]) -> str:
 def _is_tool_result(message: Dict[str, Any]) -> bool:
     content = message.get("content")
     return isinstance(content, dict) and "tool_name" in content and "tool_result" in content
+
+
+def tool_names(messages: list[Dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, dict) and "tool_name" in content:
+            name = str(content.get("tool_name") or "").strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def _tag_safe(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", value.strip().lower()).strip("-")
+    return cleaned[:64] or "unknown"
 
 
 def build_chatlog(agent: Any) -> list[dict[str, str]]:
@@ -271,6 +312,10 @@ def build_chatlog(agent: Any) -> list[dict[str, str]]:
             "timestamp": _get_timestamp(),
         })
     return entries
+
+
+def chatlog_char_count(chatlog: list[dict[str, str]]) -> int:
+    return sum(len(entry.get("content", "")) for entry in chatlog)
 
 
 def build_metadata(context: "AgentContext", agent: Any, message_count: int) -> Dict[str, str]:
@@ -318,6 +363,8 @@ async def retain_chatlog(context: "AgentContext", agent: Any) -> bool:
     }
 
     try:
+        if config.get("hindsight_operation_logging", True):
+            _log(context, f"Retain chatlog to bank '{bank_id}'", "util")
         await client.aretain_batch(
             bank_id=bank_id,
             items=[item],
@@ -326,13 +373,105 @@ async def retain_chatlog(context: "AgentContext", agent: Any) -> bool:
             retain_async=True,
         )
         if config.get("hindsight_debug", False):
-            _log(context, f"Retained chatlog to bank '{bank_id}' as '{document_id}'", "util")
+            _log(
+                context,
+                f"Retained chatlog to bank '{bank_id}' as '{document_id}'",
+                "util",
+                debug_only=True,
+            )
         return True
     except Exception as e:
         _log(context, f"Retain chatlog error: {e}", "error")
         return False
     finally:
         close_client(client)
+
+
+def _format_solution(solution: Any) -> str:
+    if isinstance(solution, dict):
+        problem = str(solution.get("problem") or "Unknown problem").strip()
+        solution_text = str(solution.get("solution") or solution.get("steps") or "Unknown solution").strip()
+        caveats = str(solution.get("caveats") or "").strip()
+        parts = [
+            "# Problem",
+            problem,
+            "",
+            "# Solution",
+            solution_text,
+        ]
+        if caveats:
+            parts.extend(["", "# Caveats", caveats])
+        return "\n".join(parts).strip()
+    return f"# Solution\n{str(solution).strip()}"
+
+
+def _solution_document_id(solution_text: str) -> str:
+    digest = hashlib.sha256(solution_text.encode("utf-8")).hexdigest()[:16]
+    return f"agent-zero:solution:{digest}"
+
+
+async def retain_solution(
+    context: "AgentContext",
+    agent: Any,
+    solution: Any,
+    tool_names_used: Optional[list[str]] = None,
+) -> bool:
+    if not is_configured(context):
+        return False
+
+    config = _get_plugin_config(agent)
+    if not config.get("hindsight_solution_extract_enabled", False):
+        return False
+
+    text = _redact_secrets(_format_solution(solution))[:12000]
+    if len(text.strip()) < 20:
+        return False
+
+    client = get_client(context)
+    if not client:
+        return False
+
+    bank_id = get_bank_id(context)
+    tools = sorted(set(tool_names_used or []))
+    tool_tags = [f"tool:{_tag_safe(name)}" for name in tools[:8]]
+    tags = ["agent-zero", "solution", "workflow", *tool_tags]
+    metadata = build_metadata(context, agent, 1)
+    metadata.update({
+        "memory_area": "solutions",
+        "solution_source": "agent-zero-utility-extraction",
+        "tools": ", ".join(tools[:20]),
+    })
+
+    try:
+        if config.get("hindsight_operation_logging", True):
+            _log(context, f"Retain solution to bank '{bank_id}'", "util")
+        await client.aretain(
+            bank_id=bank_id,
+            content=text,
+            context=config.get("hindsight_solution_context") or _DEFAULTS["hindsight_solution_context"],
+            document_id=_solution_document_id(text),
+            metadata=metadata,
+            tags=tags,
+        )
+        return True
+    except Exception as e:
+        _log(context, f"Retain solution error: {e}", "error")
+        return False
+    finally:
+        close_client(client)
+
+
+async def retain_solutions(
+    context: "AgentContext",
+    agent: Any,
+    solutions: list[Any],
+    tool_names_used: Optional[list[str]] = None,
+) -> int:
+    retained = 0
+    for solution in solutions:
+        if await retain_solution(context, agent, solution, tool_names_used):
+            retained += 1
+    return retained
 
 
 async def retain_memory(context: "AgentContext", content: str, metadata: Optional[Dict[str, str]] = None) -> bool:
@@ -357,6 +496,8 @@ async def retain_memory(context: "AgentContext", content: str, metadata: Optiona
         }
         if metadata:
             kwargs["metadata"] = metadata
+        if config.get("hindsight_operation_logging", True):
+            _log(context, f"Retain manual memory to bank '{bank_id}'", "util")
         await client.aretain(**kwargs)
         return True
     except Exception as e:
@@ -404,6 +545,8 @@ async def recall_memories(context: "AgentContext", query: str) -> Optional[str]:
     bank_id = get_bank_id(context)
 
     try:
+        if config.get("hindsight_operation_logging", True):
+            _log(context, f"Recall from bank '{bank_id}'", "util")
         result = await client.arecall(
             bank_id=bank_id,
             query=safe_query,
@@ -448,6 +591,8 @@ async def reflect_context(context: "AgentContext", query: str) -> Optional[str]:
         return None
 
     try:
+        if config.get("hindsight_operation_logging", True):
+            _log(context, f"Reflect from bank '{bank_id}'", "util")
         result = await client.areflect(
             bank_id=bank_id,
             query=safe_query,

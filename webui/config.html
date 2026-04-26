@@ -101,6 +101,120 @@
                     </div>
                 </div>
 
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Retain After Messages</div>
+                        <div class="field-description">
+                            Retain once this many new chatlog entries have accumulated since the last successful retain.
+                            Use <code>0</code> to disable this threshold.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number"
+                               x-model.number="config.hindsight_retain_min_messages"
+                               placeholder="3" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Retain After Characters</div>
+                        <div class="field-description">
+                            Retain once this many new chatlog characters have accumulated. This batches short replies
+                            while still retaining long substantive messages promptly. Use <code>0</code> to disable.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number"
+                               x-model.number="config.hindsight_retain_min_chars"
+                               placeholder="800" />
+                    </div>
+                </div>
+
+                <div style="margin-top: 1.5rem;"></div>
+                <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--warning, #ff9800);">
+                    <strong>Reusable Solution Extraction</strong> - Optional utility-model extraction of successful technical
+                    solutions, retained to Hindsight with <code>solution</code> tags only after the heuristic gate passes.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Enable Solution Extraction</div>
+                        <div class="field-description">
+                            When enabled, the plugin may call Agent Zero's utility model after substantive tool-backed work
+                            to extract reusable successful solutions.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox"
+                                   x-model="config.hindsight_solution_extract_enabled" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div x-show="config.hindsight_solution_extract_enabled">
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Solution Min Tool Calls</div>
+                            <div class="field-description">
+                                Require this many new tool result messages since the last solution check. Use <code>0</code>
+                                to allow extraction without tool activity.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_solution_extract_min_tool_calls"
+                                   placeholder="1" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Solution Min Characters</div>
+                            <div class="field-description">
+                                Require this many new chatlog characters since the last solution check. This prevents short
+                                follow-up messages from triggering the utility model.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_solution_extract_min_chars"
+                                   placeholder="1200" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Solution History Window</div>
+                            <div class="field-description">
+                                Maximum recent history characters sent to the utility model for solution extraction.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_solution_extract_max_history_chars"
+                                   placeholder="80000" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Solution Context</div>
+                            <div class="field-description">
+                                Context sent with retained solution documents. It guides Hindsight's extraction and
+                                consolidation of reusable workflows.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="text"
+                                   x-model="config.hindsight_solution_context"
+                                   placeholder="successful Agent Zero task outcome / reusable solution" />
+                        </div>
+                    </div>
+                </div>
+
                 <div style="margin-top: 1.5rem;"></div>
                 <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--success, #4caf50);">
                     <strong>Recall Injection</strong> - Searches Hindsight once per user turn and injects fenced temporary context.
@@ -223,6 +337,23 @@
 
                 <div class="field">
                     <div class="field-label">
+                        <div class="field-title">Operation Logging</div>
+                        <div class="field-description">
+                            Show one concise Agent Zero log entry for each actual Hindsight API operation, such as recall
+                            or chatlog retain.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox"
+                                   x-model="config.hindsight_operation_logging" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
                         <div class="field-title">Debug Logging</div>
                         <div class="field-description">
                             Enable extra Hindsight lifecycle logs for troubleshooting.
@@ -239,8 +370,9 @@
 
                 <div class="section-description" style="margin-top: 1rem; opacity: 0.7;">
                     <strong>Note:</strong> The lean lifecycle does not expose Hindsight tools and does not call a utility LLM
-                    to extract memory fragments. Hindsight will still show individual facts in its bank because it extracts
-                    them internally from the retained chatlog document. <code>HINDSIGHT_API_KEY</code> is optional for local
+                    to extract memory fragments. Optional solution extraction is the only path that may call the utility model,
+                    and it is gated by tool activity plus chatlog size. Hindsight will still show individual facts in its bank
+                    because it extracts them internally from retained documents. <code>HINDSIGHT_API_KEY</code> is optional for local
                     servers and can be set in <strong>Settings -> Secrets</strong>.
                 </div>
             </div>

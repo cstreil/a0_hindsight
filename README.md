@@ -33,9 +33,10 @@ Augments Agent Zero's built-in memory with [Hindsight](https://github.com/vector
 
 1. **Recall** — Once per user turn, Hindsight is queried from the clean user message and injected as fenced temporary context.
 2. **Retain** — After the final response, the conversation is retained as one structured chatlog document via `retain_batch` with a stable `document_id`.
-3. **Reflect** — Optional advanced mode. Disabled by default for the lean lifecycle.
+3. **Solution extraction** — Optional and disabled by default. A utility-model extractor runs only after a heuristic gate detects substantive tool-backed work, then stores reusable solution cards with `solution` tags.
+4. **Reflect** — Optional advanced mode. Disabled by default for the lean lifecycle.
 
-The plugin no longer calls a utility model to create individual memory fragments during retain. Hindsight may still display individual facts in the bank because it extracts facts internally from the retained chatlog document.
+The default lifecycle no longer calls a utility model to create individual memory fragments during retain. Hindsight may still display individual facts in the bank because it extracts facts internally from the retained chatlog document.
 
 ## Installation
 
@@ -131,6 +132,11 @@ hindsight/
 | Bank ID Prefix | `a0` | Prefix used only when Explicit Bank ID is blank. |
 | Enable Chatlog Retain | `true` | Retain one structured conversation document after the final response. |
 | Retain Context | `conversation between Agent Zero and the user` | Context string sent with chatlog retain calls. |
+| Enable Solution Extraction | `false` | Optional utility-model extraction of reusable successful technical solutions. |
+| Solution Min Tool Calls | `1` | New tool result count required before solution extraction can run. |
+| Solution Min Characters | `1200` | New chatlog characters required before solution extraction can run. |
+| Solution History Window | `80000` | Max recent history characters sent to the utility model for solution extraction. |
+| Solution Context | `successful Agent Zero task outcome / reusable solution` | Context string sent with retained solution documents. |
 | Enable Recall | `true` | Run one Hindsight recall per user turn. |
 | Recall Max Tokens | `4096` | Max tokens for recall results. |
 | Recall Budget | `mid` | Compute budget for recall. |
@@ -138,6 +144,7 @@ hindsight/
 | Reflect Budget | `low` | Compute budget for reflect when enabled. |
 | Reflect Max Tokens | `500` | Max tokens for reflect context when enabled. |
 | Cache TTL | `120` seconds | How long to cache reflect context when enabled. |
+| Operation Logging | `true` | Show one concise log entry per actual Hindsight API operation or gated solution extraction call. |
 | Debug Logging | `false` | Verbose lifecycle logging. |
 
 ## Hindsight Companion Skill (Optional CLI Access)

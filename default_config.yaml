@@ -34,6 +34,7 @@ hindsight_bank_id: ""
 hindsight_retain_enabled: true
 hindsight_recall_enabled: true
 hindsight_reflect_enabled: false
+hindsight_solution_extract_enabled: false
 
 # Recall settings
 hindsight_recall_max_tokens: 4096
@@ -46,8 +47,25 @@ hindsight_reflect_max_tokens: 500
 # Cache TTL for reflect context (seconds)
 hindsight_cache_ttl: 120
 
+# Show one concise status line per Hindsight API operation
+hindsight_operation_logging: true
+
 # Debug logging
 hindsight_debug: false
 
 # Context sent with structured chatlog retain_batch calls
 hindsight_retain_context: "conversation between Agent Zero and the user"
+
+# Retain after either threshold is reached since the last successful retain.
+# Set both to 0 to retain after every eligible agent turn.
+hindsight_retain_min_messages: 3
+hindsight_retain_min_chars: 800
+
+
+# Optional reusable solution extraction.
+# This is the only Hermes-style path that may call Agent Zero's utility LLM.
+# The heuristic gate requires both tool activity and enough new chatlog text.
+hindsight_solution_extract_min_tool_calls: 1
+hindsight_solution_extract_min_chars: 1200
+hindsight_solution_extract_max_history_chars: 80000
+hindsight_solution_context: "successful Agent Zero task outcome / reusable solution"

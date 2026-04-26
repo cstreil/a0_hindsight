@@ -38,30 +38,54 @@ class HindsightRetain(Extension):
         if not config.get("hindsight_retain_enabled", True):
             return
 
-        all_output = self.agent.history.output()
+        chatlog = hindsight_helper.build_chatlog(self.agent)
+        if not chatlog:
+            return
+        chatlog_count = len(chatlog)
+        chatlog_chars = hindsight_helper.chatlog_char_count(chatlog)
+
         state = getattr(context, "_hindsight", None)
         if state is None:
             context._hindsight = {}
             state = context._hindsight
-        if state.get("last_retain_message_count") == len(all_output):
+        if state.get("last_retain_seen_count") == chatlog_count:
             return
-        state["last_retain_message_count"] = len(all_output)
+        state["last_retain_seen_count"] = chatlog_count
+
+        last_retained_count = int(state.get("last_retained_chatlog_count", 0) or 0)
+        last_retained_chars = int(state.get("last_retained_chatlog_chars", 0) or 0)
+        new_messages = max(0, chatlog_count - last_retained_count)
+        new_chars = max(0, chatlog_chars - last_retained_chars)
+        min_messages = int(config.get("hindsight_retain_min_messages", 3) or 0)
+        min_chars = int(config.get("hindsight_retain_min_chars", 800) or 0)
+
+        message_threshold_met = min_messages > 0 and new_messages >= min_messages
+        char_threshold_met = min_chars > 0 and new_chars >= min_chars
+        thresholds_disabled = min_messages <= 0 and min_chars <= 0
+        if not (thresholds_disabled or message_threshold_met or char_threshold_met):
+            return
 
         try:
-            asyncio.create_task(self._retain_to_hindsight(self.agent, context))
+            task = asyncio.create_task(self._retain_to_hindsight(self.agent, context, config))
+            task.add_done_callback(
+                lambda done: self._mark_retained(done, state, chatlog_count, chatlog_chars)
+            )
         except RuntimeError:
             pass
 
     @staticmethod
-    async def _retain_to_hindsight(agent, context):
+    def _mark_retained(task, state, chatlog_count, chatlog_chars):
         try:
-            log_item = context.log.log(type="util", heading="Retaining chatlog to Hindsight...")
-            success = await hindsight_helper.retain_chatlog(context=context, agent=agent)
-            bank_id = hindsight_helper.get_bank_id(context)
-            if success:
-                log_item.update(heading=f"Hindsight chatlog retained to bank '{bank_id}'")
-            else:
-                log_item.update(heading="Hindsight chatlog retain skipped or failed")
+            if task.result():
+                state["last_retained_chatlog_count"] = chatlog_count
+                state["last_retained_chatlog_chars"] = chatlog_chars
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _retain_to_hindsight(agent, context, config):
+        try:
+            return await hindsight_helper.retain_chatlog(context=context, agent=agent)
         except Exception as e:
             try:
                 context.log.log(

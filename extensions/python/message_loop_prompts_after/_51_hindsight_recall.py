@@ -53,12 +53,14 @@ class HindsightRecall(Extension):
             return
         state["last_recall_user_key"] = user_key
 
-        log_item = context.log.log(type="util", heading="Searching Hindsight memories...")
+        debug = bool(config.get("hindsight_debug", False))
+        log_item = context.log.log(type="util", heading="Searching Hindsight memories...") if debug else None
 
         try:
             query = user_message.output_text().strip() if user_message else ""
             if len(query) < 3:
-                log_item.update(heading="Insufficient query for Hindsight recall")
+                if log_item:
+                    log_item.update(heading="Insufficient query for Hindsight recall")
                 return
 
             recall_result = await asyncio.wait_for(
@@ -67,17 +69,22 @@ class HindsightRecall(Extension):
             )
 
             if recall_result and recall_result.strip():
-                log_item.update(heading="Hindsight memories found", content=recall_result[:500])
+                if log_item:
+                    log_item.update(heading="Hindsight memories found", content=recall_result[:500])
                 hindsight_prompt = self.agent.read_prompt(
                     "hindsight.recall.md",
                     hindsight_memories=recall_result,
                 )
                 loop_data.extras_temporary["hindsight_memories"] = hindsight_prompt
             else:
-                log_item.update(heading="No Hindsight memories found")
+                if log_item:
+                    log_item.update(heading="No Hindsight memories found")
 
         except asyncio.TimeoutError:
-            log_item.update(heading="Hindsight recall timed out")
+            if log_item:
+                log_item.update(heading="Hindsight recall timed out")
+            else:
+                context.log.log(type="warning", heading="Hindsight recall timed out")
         except Exception as e:
             context.log.log(
                 type="warning",
