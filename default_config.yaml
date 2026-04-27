@@ -62,6 +62,22 @@ hindsight_retain_min_chars: 800
 hindsight_scheduler_task_context: "automated task execution result and status log"
 
 
+# Optional nightly dreaming workflow.
+# Disabled by default. When enabled, Agent Zero opportunistically runs the
+# workflow after foreground turns once the interval is due. It refreshes mental
+# models, waits for refresh jobs, and stores one tagged dream-journal synthesis
+# at most once per day.
+hindsight_dreaming_enabled: false
+hindsight_dreaming_interval_hours: 24
+hindsight_dreaming_min_model_refresh_age_hours: 12
+hindsight_dreaming_wait_for_refresh: true
+hindsight_dreaming_operation_timeout_seconds: 900
+hindsight_dreaming_poll_seconds: 5
+hindsight_dreaming_synthesis_enabled: true
+hindsight_dreaming_synthesis_budget: "mid"
+hindsight_dreaming_synthesis_max_tokens: 2048
+
+
 # Optional reusable solution extraction.
 # This is the only Hermes-style path that may call Agent Zero's utility LLM.
 # The heuristic gate requires both tool activity and enough new chatlog text.

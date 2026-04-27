@@ -71,6 +71,28 @@ cross-agent-solution
 tool:<tool-name>
 ```
 
+### Optional Dreaming
+
+Dreaming is disabled by default. When enabled, Agent Zero opportunistically runs a background workflow when the configured interval is due:
+
+- checks whether the Hindsight bank has changed since the last run
+- refreshes stale mental models only when useful
+- waits for refresh operations to complete
+- stores at most one daily `dream-analysis-YYYY-MM-DD` meta document
+- tags dream entries with `source:dreaming` and `type:dream-journal`
+
+The dream synthesis prompt explicitly treats older dream entries as meta-observations, not source facts, to reduce self-reinforcing summaries.
+
+```yaml
+hindsight_dreaming_enabled: false
+hindsight_dreaming_interval_hours: 24
+hindsight_dreaming_min_model_refresh_age_hours: 12
+hindsight_dreaming_wait_for_refresh: true
+hindsight_dreaming_synthesis_enabled: true
+```
+
+Once this plugin feature is enabled, any separate host-level cron or systemd job that runs a Hindsight dreaming script should be disabled to avoid duplicate daily synthesis documents.
+
 ## Removed Scope
 
 This fork intentionally does not include Hindsight Reflect prompt injection. Recall plus structured retain is the supported default path. Reflect can be evaluated separately later, but it is not part of this lean plugin lifecycle.
@@ -93,6 +115,7 @@ Then restart Agent Zero, enable the plugin, and configure:
 - Enable Recall
 - Enable Chatlog Retain
 - optionally Enable Solution Extraction
+- optionally Enable Dreaming
 
 Make sure the Agent Zero container can reach the Hindsight server URL.
 
@@ -113,6 +136,14 @@ Make sure the Agent Zero container can reach the Hindsight server URL.
 | `hindsight_retain_min_chars` | `800` | Retain after this many new chatlog characters. |
 | `hindsight_scheduler_task_log_enabled` | `true` | Retain one scheduler result document instead of using normal memory operations. |
 | `hindsight_scheduler_task_context` | `automated task execution result and status log` | Context for scheduled task result documents. |
+| `hindsight_dreaming_enabled` | `false` | Enable background mental-model refresh and daily dream synthesis. |
+| `hindsight_dreaming_interval_hours` | `24` | Minimum hours between plugin-triggered dreaming runs. |
+| `hindsight_dreaming_min_model_refresh_age_hours` | `12` | Skip mental models refreshed more recently than this. |
+| `hindsight_dreaming_wait_for_refresh` | `true` | Wait for async mental-model refresh operations before synthesis. |
+| `hindsight_dreaming_operation_timeout_seconds` | `900` | Maximum wait time per refresh operation. |
+| `hindsight_dreaming_synthesis_enabled` | `true` | Store one daily dream-journal synthesis when memory state changed. |
+| `hindsight_dreaming_synthesis_budget` | `mid` | Hindsight reflect budget for the dream synthesis. |
+| `hindsight_dreaming_synthesis_max_tokens` | `2048` | Max reflect response size for the dream synthesis. |
 | `hindsight_solution_extract_enabled` | `false` | Enable gated utility-model solution extraction. |
 | `hindsight_solution_extract_min_tool_calls` | `1` | Require new tool activity before solution extraction. |
 | `hindsight_solution_extract_min_chars` | `1200` | Require enough new chatlog content before solution extraction. |
@@ -127,6 +158,7 @@ Runtime files such as `config.json`, `execute_record.json`, `.dependency_status.
 ## Limitations
 
 - Solution documents are deduplicated by content hash. Similar but differently worded solutions may be stored as separate documents.
+- Dreaming uses Hindsight's reflect endpoint and therefore inherits the quality and filtering limits of the bank configuration.
 - Secret redaction covers common patterns, but sensitive environments should still review what is retained.
 - Solution extraction uses Agent Zero's utility model when enabled.
 - Scheduled task detection uses Agent Zero scheduler metadata when available and falls back to `## Task:` prompts.

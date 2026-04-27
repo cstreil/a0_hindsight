@@ -178,6 +178,135 @@
                 </div>
 
                 <div style="margin-top: 1.5rem;"></div>
+                <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--accent, #6c63ff);">
+                    <strong>Dreaming</strong> - Optional background refresh of Hindsight mental models plus one daily
+                    dream-journal synthesis retained as a tagged meta document.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Enable Dreaming</div>
+                        <div class="field-description">
+                            Run the dreaming workflow from the plugin when due. This replaces a separate host-level
+                            scheduler once enabled. The workflow runs in the background after foreground turns.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox"
+                                   x-model="config.hindsight_dreaming_enabled" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div x-show="config.hindsight_dreaming_enabled">
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Dreaming Interval Hours</div>
+                            <div class="field-description">
+                                Minimum time between plugin-triggered dreaming runs.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_dreaming_interval_hours"
+                                   placeholder="24" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Model Refresh Minimum Age</div>
+                            <div class="field-description">
+                                Skip mental models refreshed more recently than this many hours.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_dreaming_min_model_refresh_age_hours"
+                                   placeholder="12" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Wait For Refresh Jobs</div>
+                            <div class="field-description">
+                                Poll Hindsight refresh operations until they complete before running the synthesis.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox"
+                                       x-model="config.hindsight_dreaming_wait_for_refresh" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Refresh Timeout Seconds</div>
+                            <div class="field-description">
+                                Maximum wait time for each Hindsight mental-model refresh operation.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_dreaming_operation_timeout_seconds"
+                                   placeholder="900" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Enable Dream Synthesis</div>
+                            <div class="field-description">
+                                Store one daily tagged dream-journal document when new memory state warrants it.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox"
+                                       x-model="config.hindsight_dreaming_synthesis_enabled" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field" x-show="config.hindsight_dreaming_synthesis_enabled">
+                        <div class="field-label">
+                            <div class="field-title">Dream Synthesis Budget</div>
+                            <div class="field-description">
+                                Hindsight reflect budget used for the daily dream-journal entry.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <select x-model="config.hindsight_dreaming_synthesis_budget">
+                                <option value="low">Low</option>
+                                <option value="mid">Mid</option>
+                                <option value="high">High</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="field" x-show="config.hindsight_dreaming_synthesis_enabled">
+                        <div class="field-label">
+                            <div class="field-title">Dream Max Tokens</div>
+                            <div class="field-description">
+                                Maximum tokens returned by Hindsight reflect for the dream synthesis.
+                            </div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number"
+                                   x-model.number="config.hindsight_dreaming_synthesis_max_tokens"
+                                   placeholder="2048" />
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 1.5rem;"></div>
                 <div class="section-description" style="margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary, #1a1a2e); border-radius: 6px; border-left: 3px solid var(--warning, #ff9800);">
                     <strong>Reusable Solution Extraction</strong> - Optional utility-model extraction of successful technical
                     solutions, retained to Hindsight with <code>solution</code> tags only after the heuristic gate passes.

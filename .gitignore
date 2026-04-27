@@ -12,3 +12,4 @@ vendor/
 .dependency_status.json
 config.json
 .toggle-*
+.dreaming_state.json
