@@ -44,7 +44,7 @@ Scheduled task turns do not receive memory context and are not retained as ordin
 
 ```yaml
 hindsight_scheduler_task_log_enabled: true
-hindsight_scheduler_task_context: "Agent Zero scheduled task execution result"
+hindsight_scheduler_task_context: "automated task execution result and status log"
 ```
 
 The document ID uses the scheduler task UUID when available and falls back to a stable prompt hash.
@@ -63,8 +63,11 @@ Extracted solutions are retained with tags such as:
 
 ```text
 agent-zero
+source:agent-zero
+shared-memory
 solution
 workflow
+cross-agent-solution
 tool:<tool-name>
 ```
 
@@ -104,11 +107,12 @@ Make sure the Agent Zero container can reach the Hindsight server URL.
 | `hindsight_recall_max_tokens` | `4096` | Max recall response size. |
 | `hindsight_recall_budget` | `mid` | Hindsight recall budget. |
 | `hindsight_retain_enabled` | `true` | Retain structured chatlogs to Hindsight. |
-| `hindsight_retain_context` | `conversation between Agent Zero and the user` | Context for chatlog retain. |
+| `hindsight_retain_context` | `conversation between AI Agent and the User` | Context for chatlog retain. |
+| `hindsight_shared_bank_tag` | `shared-memory` | Optional tag for retained items when multiple agents share a bank. Leave blank to disable. |
 | `hindsight_retain_min_messages` | `3` | Retain after this many new chatlog entries. |
 | `hindsight_retain_min_chars` | `800` | Retain after this many new chatlog characters. |
 | `hindsight_scheduler_task_log_enabled` | `true` | Retain one scheduler result document instead of using normal memory operations. |
-| `hindsight_scheduler_task_context` | `Agent Zero scheduled task execution result` | Context for scheduled task result documents. |
+| `hindsight_scheduler_task_context` | `automated task execution result and status log` | Context for scheduled task result documents. |
 | `hindsight_solution_extract_enabled` | `false` | Enable gated utility-model solution extraction. |
 | `hindsight_solution_extract_min_tool_calls` | `1` | Require new tool activity before solution extraction. |
 | `hindsight_solution_extract_min_chars` | `1200` | Require enough new chatlog content before solution extraction. |

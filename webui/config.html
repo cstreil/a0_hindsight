@@ -97,7 +97,22 @@
                     <div class="field-control">
                         <input type="text"
                                x-model="config.hindsight_retain_context"
-                               placeholder="conversation between Agent Zero and the user" />
+                               placeholder="conversation between AI Agent and the User" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Shared Bank Tag</div>
+                        <div class="field-description">
+                            Optional tag added to retained chatlogs, solutions, and scheduler logs when multiple agents
+                            write to the same Hindsight bank. Leave blank to disable.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="text"
+                               x-model="config.hindsight_shared_bank_tag"
+                               placeholder="shared-memory" />
                     </div>
                 </div>
 
@@ -158,7 +173,7 @@
                     <div class="field-control">
                         <input type="text"
                                x-model="config.hindsight_scheduler_task_context"
-                               placeholder="Agent Zero scheduled task execution result" />
+                               placeholder="automated task execution result and status log" />
                     </div>
                 </div>
 

@@ -62,11 +62,12 @@ _DEFAULTS: Dict[str, Any] = {
     "hindsight_recall_enabled": True,
     "hindsight_recall_max_tokens": 4096,
     "hindsight_recall_budget": "mid",
-    "hindsight_retain_context": "conversation between Agent Zero and the user",
+    "hindsight_retain_context": "conversation between AI Agent and the User",
+    "hindsight_shared_bank_tag": "shared-memory",
     "hindsight_retain_min_messages": 3,
     "hindsight_retain_min_chars": 800,
     "hindsight_scheduler_task_log_enabled": True,
-    "hindsight_scheduler_task_context": "Agent Zero scheduled task execution result",
+    "hindsight_scheduler_task_context": "automated task execution result and status log",
     "hindsight_operation_logging": True,
     "hindsight_solution_extract_enabled": False,
     "hindsight_solution_extract_min_tool_calls": 1,
@@ -79,9 +80,13 @@ _DEFAULTS: Dict[str, Any] = {
 _GLOBAL_SETTINGS = {"hindsight_base_url", "hindsight_bank_prefix"}
 _SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)([a-z0-9_.-]*(?:api[_-]?key|token|secret|password|passwd)[a-z0-9_.-]*)\s*=\s*([^\s,;]+)"),
+    re.compile(r"(?i)([\"']?[a-z0-9_.-]*(?:api[_-]?key|token|secret|password|passwd)[a-z0-9_.-]*[\"']?)\s*:\s*([\"'][^\"']{8,}[\"']|[^\s,;}]{8,})"),
+    re.compile(r"(?i)(export\s+[a-z0-9_.-]*(?:api[_-]?key|token|secret|password|passwd)[a-z0-9_.-]*)\s*=\s*([^\s,;]+)"),
     re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd)\s*\(([^)\s]{12,})\)"),
     re.compile(r"(?i)(bearer)\s+[a-z0-9._~+/=-]{16,}"),
     re.compile(r"\b(am_[a-zA-Z0-9_]{24,})\b"),
+    re.compile(r"\b(whsec_[a-zA-Z0-9_]{16,})\b"),
 ]
 
 
@@ -247,6 +252,20 @@ def _redact_secrets(text: str) -> str:
             return "[REDACTED]"
         redacted = pattern.sub(repl, redacted)
     return redacted
+
+
+def _configured_tags(config: Dict[str, Any], key: str) -> list[str]:
+    raw = config.get(key, "")
+    if isinstance(raw, str):
+        return [_tag_safe(item) for item in raw.split(",") if item.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [_tag_safe(str(item)) for item in raw if str(item).strip()]
+    return []
+
+
+def _shared_tags(config: Dict[str, Any]) -> list[str]:
+    shared_tag = str(config.get("hindsight_shared_bank_tag") or "").strip()
+    return [_tag_safe(shared_tag)] if shared_tag else []
 
 
 def _normalize_task_text(text: str) -> str:
@@ -507,10 +526,15 @@ def chatlog_char_count(chatlog: list[dict[str, str]]) -> int:
 
 
 def build_metadata(context: "AgentContext", agent: Any, message_count: int) -> Dict[str, str]:
+    agent_name = str(getattr(agent, "agent_name", "") or "agent-zero")
     metadata = {
         "framework": "agent-zero",
+        "platform": "agent-zero",
+        "source": "agent-zero",
+        "agent_identity": agent_name,
         "session_id": str(getattr(context, "id", "")),
-        "agent_name": str(getattr(agent, "agent_name", "")),
+        "chat_id": str(getattr(context, "id", "")),
+        "agent_name": agent_name,
         "agent_profile": str(getattr(getattr(agent, "config", None), "profile", "")),
         "message_count": str(message_count),
         "retained_at": _get_timestamp(),
@@ -554,6 +578,14 @@ async def retain_scheduled_task_log(
         "task_name": str(task.get("name") or ""),
         "task_type": str(task.get("type") or "scheduled"),
     })
+    tags = [
+        "agent-zero",
+        "source:agent-zero",
+        "scheduled-task",
+        "automation-log",
+        *_shared_tags(config),
+        f"task:{_tag_safe(task_id)}",
+    ]
 
     try:
         if config.get("hindsight_operation_logging", True):
@@ -564,7 +596,7 @@ async def retain_scheduled_task_log(
             context=config.get("hindsight_scheduler_task_context") or _DEFAULTS["hindsight_scheduler_task_context"],
             document_id=document_id,
             metadata=metadata,
-            tags=["agent-zero", "scheduled-task", f"task:{_tag_safe(task_id)}"],
+            tags=tags,
         )
         return True
     except Exception as e:
@@ -592,11 +624,19 @@ async def retain_chatlog(context: "AgentContext", agent: Any) -> bool:
 
     bank_id = get_bank_id(context)
     document_id = f"agent-zero:{getattr(context, 'id', 'default')}"
+    tags = [
+        "agent-zero",
+        "source:agent-zero",
+        "chatlog",
+        *_shared_tags(config),
+        *_configured_tags(config, "hindsight_retain_tags"),
+    ]
+    tags = list(dict.fromkeys(tags))
     item = {
         "content": json.dumps(chatlog, ensure_ascii=False),
         "context": config.get("hindsight_retain_context") or _DEFAULTS["hindsight_retain_context"],
         "metadata": build_metadata(context, agent, len(chatlog)),
-        "tags": ["agent-zero", "chatlog"],
+        "tags": tags,
     }
 
     try:
@@ -606,7 +646,7 @@ async def retain_chatlog(context: "AgentContext", agent: Any) -> bool:
             bank_id=bank_id,
             items=[item],
             document_id=document_id,
-            document_tags=["agent-zero", "chatlog"],
+            document_tags=tags,
             retain_async=True,
         )
         if config.get("hindsight_debug", False):
@@ -671,7 +711,15 @@ async def retain_solution(
     bank_id = get_bank_id(context)
     tools = sorted(set(tool_names_used or []))
     tool_tags = [f"tool:{_tag_safe(name)}" for name in tools[:8]]
-    tags = ["agent-zero", "solution", "workflow", *tool_tags]
+    tags = [
+        "agent-zero",
+        "source:agent-zero",
+        "solution",
+        "workflow",
+        "cross-agent-solution",
+        *_shared_tags(config),
+        *tool_tags,
+    ]
     metadata = build_metadata(context, agent, 1)
     metadata.update({
         "memory_area": "solutions",
@@ -757,7 +805,8 @@ async def recall_memories(context: "AgentContext", query: str) -> Optional[str]:
             max_tokens=config.get("hindsight_recall_max_tokens", 4096),
             budget=config.get("hindsight_recall_budget", "mid"),
         )
-        return _format_recall_result(result)
+        formatted = _format_recall_result(result)
+        return _redact_secrets(formatted) if formatted else None
     except Exception as e:
         error_msg = str(e)
         if "400" in error_msg or "Bad Request" in error_msg:

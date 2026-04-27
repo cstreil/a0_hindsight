@@ -82,13 +82,31 @@ class HindsightHelperTests(unittest.TestCase):
 
     def test_secret_redaction_covers_common_tokens(self):
         text = h._redact_secrets(
-            "api_key=abc123456789 password:supersecret am_abcdefghijklmnopqrstuvwxyz"
+            "api_key=abc123456789 password:supersecret am_abcdefghijklmnopqrstuvwxyz "
+            "\"client_secret\": \"very-secret-value\" export HERMES_TOKEN=tok_123456789 "
+            "whsec_abcdefghijklmnopqrstuvwxyz"
         )
 
         self.assertNotIn("abc123456789", text)
         self.assertNotIn("supersecret", text)
         self.assertNotIn("am_abcdefghijklmnopqrstuvwxyz", text)
+        self.assertNotIn("very-secret-value", text)
+        self.assertNotIn("tok_123456789", text)
+        self.assertNotIn("whsec_abcdefghijklmnopqrstuvwxyz", text)
         self.assertIn("[REDACTED]", text)
+
+    def test_metadata_includes_shared_bank_source_fields(self):
+        context = SimpleNamespace(id="ctx-test")
+        agent = self.agent([], context_id="ctx-test")
+
+        metadata = h.build_metadata(context, agent, 2)
+
+        self.assertEqual(metadata["framework"], "agent-zero")
+        self.assertEqual(metadata["platform"], "agent-zero")
+        self.assertEqual(metadata["source"], "agent-zero")
+        self.assertEqual(metadata["agent_identity"], "A0")
+        self.assertEqual(metadata["session_id"], "ctx-test")
+        self.assertEqual(metadata["chat_id"], "ctx-test")
 
 
 if __name__ == "__main__":

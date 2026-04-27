@@ -46,7 +46,11 @@ hindsight_operation_logging: true
 hindsight_debug: false
 
 # Context sent with structured chatlog retain_batch calls
-hindsight_retain_context: "conversation between Agent Zero and the user"
+hindsight_retain_context: "conversation between AI Agent and the User"
+
+# Optional tag added to retained items when multiple agents share a bank.
+# Leave blank to disable.
+hindsight_shared_bank_tag: "shared-memory"
 
 # Retain after either threshold is reached since the last successful retain.
 # Set both to 0 to retain after every eligible agent turn.
@@ -55,7 +59,7 @@ hindsight_retain_min_chars: 800
 
 # Scheduled task turns skip recall/chatlog/solution extraction. When enabled,
 # their final result is retained as one stable task-log document instead.
-hindsight_scheduler_task_context: "Agent Zero scheduled task execution result"
+hindsight_scheduler_task_context: "automated task execution result and status log"
 
 
 # Optional reusable solution extraction.
