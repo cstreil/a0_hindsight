@@ -37,6 +37,8 @@ class HindsightRecall(Extension):
         config = hindsight_helper._get_plugin_config(self.agent)
         if not config.get("hindsight_recall_enabled", True):
             return
+        if hindsight_helper.is_scheduled_task_turn(context, loop_data):
+            return
 
         user_message = loop_data.user_message
         user_key = getattr(user_message, "id", None) or (

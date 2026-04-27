@@ -1,78 +1,65 @@
-# Hindsight Memory Plugin for Agent Zero - Hermes-Style Lifecycle PoC
+# Hindsight Memory Plugin for Agent Zero
 
-This fork is a proof of concept based on the original Agent Zero Hindsight plugin.
-The original plugin connects Agent Zero to [Hindsight](https://github.com/vectorize-io/hindsight), allowing Agent Zero to retain conversation memory, recall relevant memories, and optionally inject Hindsight reflect context.
-
-This branch keeps that purpose, but changes the default memory lifecycle to be leaner and closer to the Hindsight integration used by Hermes Agent.
-
-## What Changed
-
-The main change is that routine memory retention no longer extracts many individual memory fragments in the plugin.
-
-Instead, the default lifecycle is:
+This fork connects Agent Zero to [Hindsight](https://github.com/vectorize-io/hindsight) with a deliberately small memory lifecycle:
 
 ```text
-user turn -> one Hindsight recall -> fenced temporary context -> LLM response -> gated structured chatlog retain
+user turn -> one Hindsight recall -> fenced temporary context -> final response -> structured chatlog retain
 ```
 
-The plugin submits structured conversation material to Hindsight and lets Hindsight do its own fact/entity/relationship extraction internally.
+The plugin avoids plugin-side memory-fragment extraction for normal conversation. It sends clean, structured conversation logs to Hindsight and lets Hindsight do its own extraction and consolidation.
 
-## Key Improvements
+## Core Behavior
 
-### Structured Chatlog Retain
+### Recall
 
-- Retains one structured chatlog document with `retain_batch`.
-- Uses a stable `document_id` per Agent Zero session: `agent-zero:<context-id>`.
-- Sends the full accumulated chatlog so Hindsight can reprocess the evolving conversation.
-- Skips tool-result messages when building the chatlog.
+- Runs at most once per user message.
+- Uses the clean user message as the recall query.
+- Injects results as temporary fenced context in `<memory-context>`.
+- Does not write recalled memory back into Agent Zero history.
+- Skips scheduled task turns.
+
+### Chatlog Retain
+
+- Retains one structured chatlog document per Agent Zero session with `retain_batch`.
+- Uses stable document IDs: `agent-zero:<context-id>`.
+- Stores user-visible conversation only:
+  - user messages
+  - final assistant responses
+- Excludes Agent Zero `thoughts`, planning JSON, tool choices, and tool result messages.
 - Redacts common secret patterns before retain.
+- Skips scheduled task turns.
 
-### Retain Throttling
-
-Chatlog retain can now be batched instead of running after every short message.
-
-Defaults:
+Retain is throttled by message and character thresholds:
 
 ```yaml
 hindsight_retain_min_messages: 3
 hindsight_retain_min_chars: 800
 ```
 
-Retain runs when either threshold is reached since the last successful retain.
-Set both values to `0` to retain after every eligible turn.
+Retain runs when either threshold is reached since the last successful retain. Set both to `0` to retain after every eligible turn.
 
-### One Recall Per User Turn
+### Scheduled Task Logs
 
-- Recall runs at most once per user message.
-- The recall query is built from the clean user message.
-- Recalled context is injected as temporary fenced context:
+Scheduled task turns do not receive memory context and are not retained as ordinary chatlog entries. Instead, the plugin can retain one stable task-result document per scheduled task.
 
-```xml
-<memory-context>
-...
-</memory-context>
+```yaml
+hindsight_scheduler_task_log_enabled: true
+hindsight_scheduler_task_context: "Agent Zero scheduled task execution result"
 ```
 
-The recalled memory context is not persisted back into Agent Zero history.
+The document ID uses the scheduler task UUID when available and falls back to a stable prompt hash.
 
-### Optional Gated Solution Extraction
+### Optional Solution Extraction
 
-This fork adds an optional replacement for Agent Zero's native "solutions" memory behavior.
-
-It is disabled by default:
+Solution extraction is disabled by default. When enabled, it is gated so the utility model is only called after substantive tool-backed work.
 
 ```yaml
 hindsight_solution_extract_enabled: false
-```
-
-When enabled, it only calls Agent Zero's utility model after a cheap heuristic gate detects substantive tool-backed work:
-
-```yaml
 hindsight_solution_extract_min_tool_calls: 1
 hindsight_solution_extract_min_chars: 1200
 ```
 
-If reusable technical solutions are found, they are retained to Hindsight as solution documents with tags such as:
+Extracted solutions are retained with tags such as:
 
 ```text
 agent-zero
@@ -81,44 +68,13 @@ workflow
 tool:<tool-name>
 ```
 
-This keeps normal conversation memory cheap while still allowing successful technical workflows to become reusable Hindsight memories.
+## Removed Scope
 
-### Quieter, More Transparent Logging
-
-Normal operation now logs one concise line per actual Hindsight API operation:
-
-- `Recall from bank ...`
-- `Retain chatlog to bank ...`
-- `Retain solution to bank ...`
-- `Reflect from bank ...` if reflect is enabled
-
-Verbose lifecycle messages remain available through `hindsight_debug`.
-
-### Reflect Is Advanced/Optional
-
-Reflect remains supported, but is disabled by default.
-The recommended default lifecycle is recall plus structured chatlog retain.
-
-## Why This Direction
-
-The original plugin worked, but in testing it created too much activity for routine turns:
-
-- many plugin-side memory fragments
-- repeated status log entries
-- utility-model work for memory extraction even when Hindsight could extract from the retained document itself
-
-This fork aims for:
-
-- fewer utility-model calls
-- fewer retain calls
-- clearer separation between Agent Zero history and Hindsight recall context
-- Hindsight as the long-term memory provider
-- optional, explicit solution extraction for reusable technical workflows
+This fork intentionally does not include Hindsight Reflect prompt injection. Recall plus structured retain is the supported default path. Reflect can be evaluated separately later, but it is not part of this lean plugin lifecycle.
 
 ## Manual Installation
 
-This branch is not intended to be installed from the Plugin Hub.
-For manual testing:
+This branch is not intended to be installed from the Plugin Hub. For manual testing:
 
 ```bash
 cd /path/to/agent-zero/usr/plugins
@@ -137,26 +93,39 @@ Then restart Agent Zero, enable the plugin, and configure:
 
 Make sure the Agent Zero container can reach the Hindsight server URL.
 
-## Important Settings
+## Settings
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
+| `hindsight_base_url` | empty | Hindsight API server URL. Can also be set with `HINDSIGHT_BASE_URL`. |
+| `hindsight_bank_id` | empty | Explicit bank ID override. |
+| `hindsight_bank_prefix` | `a0` | Prefix for derived bank IDs when no explicit bank is set. |
 | `hindsight_recall_enabled` | `true` | Run one recall per user turn. |
+| `hindsight_recall_max_tokens` | `4096` | Max recall response size. |
+| `hindsight_recall_budget` | `mid` | Hindsight recall budget. |
 | `hindsight_retain_enabled` | `true` | Retain structured chatlogs to Hindsight. |
+| `hindsight_retain_context` | `conversation between Agent Zero and the user` | Context for chatlog retain. |
 | `hindsight_retain_min_messages` | `3` | Retain after this many new chatlog entries. |
 | `hindsight_retain_min_chars` | `800` | Retain after this many new chatlog characters. |
+| `hindsight_scheduler_task_log_enabled` | `true` | Retain one scheduler result document instead of using normal memory operations. |
+| `hindsight_scheduler_task_context` | `Agent Zero scheduled task execution result` | Context for scheduled task result documents. |
 | `hindsight_solution_extract_enabled` | `false` | Enable gated utility-model solution extraction. |
 | `hindsight_solution_extract_min_tool_calls` | `1` | Require new tool activity before solution extraction. |
 | `hindsight_solution_extract_min_chars` | `1200` | Require enough new chatlog content before solution extraction. |
+| `hindsight_solution_extract_max_history_chars` | `80000` | Recent history window sent to the utility model. |
 | `hindsight_operation_logging` | `true` | Show concise log entries for actual Hindsight operations. |
 | `hindsight_debug` | `false` | Show verbose lifecycle/debug logs. |
-| `hindsight_reflect_enabled` | `false` | Enable optional Hindsight reflect context. |
 
-## Current Limitations
+## Repository Hygiene
 
-- Solution documents are currently deduplicated by content hash. Similar but differently worded solutions may be stored as separate documents.
-- Secret redaction covers common patterns, but solution extraction should still be treated carefully in sensitive environments.
-- The solution extractor is intentionally conservative and gated, but it still uses Agent Zero's utility model when it runs.
+Runtime files such as `config.json`, `execute_record.json`, `.dependency_status.json`, `.toggle-*`, `vendor/`, and Python caches are intentionally ignored and should not be committed.
+
+## Limitations
+
+- Solution documents are deduplicated by content hash. Similar but differently worded solutions may be stored as separate documents.
+- Secret redaction covers common patterns, but sensitive environments should still review what is retained.
+- Solution extraction uses Agent Zero's utility model when enabled.
+- Scheduled task detection uses Agent Zero scheduler metadata when available and falls back to `## Task:` prompts.
 
 ## Repository Context
 

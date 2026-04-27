@@ -11,7 +11,6 @@
 #   - hindsight_bank_id: Explicit bank ID override
 #   - hindsight_retain_enabled: Store conversation memories after each interaction
 #   - hindsight_recall_enabled: Enrich recall with semantic search
-#   - hindsight_reflect_enabled: Inject disposition-aware context
 #   - All other settings below
 #   Use the "Default" project for fallback values that apply when a
 #   project has no explicit override.
@@ -33,19 +32,12 @@ hindsight_bank_id: ""
 # Enable/disable individual Hindsight operations
 hindsight_retain_enabled: true
 hindsight_recall_enabled: true
-hindsight_reflect_enabled: false
 hindsight_solution_extract_enabled: false
+hindsight_scheduler_task_log_enabled: true
 
 # Recall settings
 hindsight_recall_max_tokens: 4096
 hindsight_recall_budget: "mid"
-
-# Reflect settings
-hindsight_reflect_budget: "low"
-hindsight_reflect_max_tokens: 500
-
-# Cache TTL for reflect context (seconds)
-hindsight_cache_ttl: 120
 
 # Show one concise status line per Hindsight API operation
 hindsight_operation_logging: true
@@ -60,6 +52,10 @@ hindsight_retain_context: "conversation between Agent Zero and the user"
 # Set both to 0 to retain after every eligible agent turn.
 hindsight_retain_min_messages: 3
 hindsight_retain_min_chars: 800
+
+# Scheduled task turns skip recall/chatlog/solution extraction. When enabled,
+# their final result is retained as one stable task-log document instead.
+hindsight_scheduler_task_context: "Agent Zero scheduled task execution result"
 
 
 # Optional reusable solution extraction.

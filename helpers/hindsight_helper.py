@@ -11,7 +11,6 @@ import json
 import os
 import re
 import sys
-import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, TYPE_CHECKING
 
@@ -55,22 +54,19 @@ def _import_hindsight() -> bool:
 
 _import_hindsight()
 
-_reflect_cache: Dict[str, tuple] = {}
 
 _DEFAULTS: Dict[str, Any] = {
     "hindsight_bank_id": "",
     "hindsight_bank_prefix": "a0",
     "hindsight_retain_enabled": True,
     "hindsight_recall_enabled": True,
-    "hindsight_reflect_enabled": False,
     "hindsight_recall_max_tokens": 4096,
     "hindsight_recall_budget": "mid",
-    "hindsight_reflect_budget": "low",
-    "hindsight_reflect_max_tokens": 500,
-    "hindsight_cache_ttl": 120,
     "hindsight_retain_context": "conversation between Agent Zero and the user",
     "hindsight_retain_min_messages": 3,
     "hindsight_retain_min_chars": 800,
+    "hindsight_scheduler_task_log_enabled": True,
+    "hindsight_scheduler_task_context": "Agent Zero scheduled task execution result",
     "hindsight_operation_logging": True,
     "hindsight_solution_extract_enabled": False,
     "hindsight_solution_extract_min_tool_calls": 1,
@@ -148,26 +144,7 @@ def _get_timestamp() -> str:
 
 
 def is_hindsight_client_available() -> bool:
-    available = _import_hindsight()
-    if available:
-        _update_status_file_success()
-    return available
-
-
-def _update_status_file_success(context: Optional["AgentContext"] = None) -> None:
-    try:
-        status_file = os.path.join(plugin_dir, ".dependency_status.json")
-        status_data = {
-            "checked_at": _get_timestamp(),
-            "hindsight_client": True,
-            "warnings": [],
-            "errors": [],
-        }
-        with open(status_file, "w") as f:
-            json.dump(status_data, f, indent=2)
-    except Exception as e:
-        if context:
-            _log(context, f"Could not update status file: {e}", "warning")
+    return _import_hindsight()
 
 
 def _get_secret(key: str, default: str = "", context: Optional["AgentContext"] = None) -> str:
@@ -272,9 +249,204 @@ def _redact_secrets(text: str) -> str:
     return redacted
 
 
+def _normalize_task_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _scheduler_tasks_path() -> str:
+    usr_dir = os.path.dirname(os.path.dirname(plugin_dir))
+    return os.path.join(usr_dir, "scheduler", "tasks.json")
+
+
+def _load_scheduler_tasks() -> list[Dict[str, Any]]:
+    try:
+        with open(_scheduler_tasks_path(), "r") as f:
+            data = json.load(f)
+        tasks = data.get("tasks", []) if isinstance(data, dict) else []
+        return tasks if isinstance(tasks, list) else []
+    except Exception:
+        return []
+
+
+def _current_user_text(loop_data: Any = None) -> str:
+    user_message = getattr(loop_data, "user_message", None) if loop_data else None
+    if not user_message:
+        return ""
+    try:
+        return user_message.output_text().strip()
+    except Exception:
+        return str(user_message or "").strip()
+
+
+def get_scheduled_task_for_text(context: "AgentContext", user_text: str) -> Optional[Dict[str, Any]]:
+    user_text = re.sub(r"(?i)^\s*(user|human):\s*", "", user_text or "").strip()
+    if not user_text.startswith("## Task"):
+        return None
+
+    context_id = str(getattr(context, "id", "") or "")
+    normalized_user = _normalize_task_text(user_text.replace("## Task:", "", 1))
+    for task in _load_scheduler_tasks():
+        if not isinstance(task, dict):
+            continue
+        prompt = _normalize_task_text(str(task.get("prompt") or ""))
+        if not prompt:
+            continue
+        same_context = context_id and str(task.get("context_id") or "") == context_id
+        prompt_matches = prompt in normalized_user or normalized_user in prompt
+        if same_context and prompt_matches:
+            return task
+
+    digest = hashlib.sha256(normalized_user.encode("utf-8")).hexdigest()[:12]
+    return {
+        "uuid": f"prompt-{digest}",
+        "context_id": context_id,
+        "name": "scheduled-task",
+        "type": "scheduled",
+        "prompt": user_text.replace("## Task:", "", 1).strip(),
+        "schedule": {},
+    }
+
+
+def get_scheduled_task(context: "AgentContext", loop_data: Any = None) -> Optional[Dict[str, Any]]:
+    """Return the scheduler task for the current turn, if this turn is a scheduled run."""
+    return get_scheduled_task_for_text(context, _current_user_text(loop_data))
+
+
+def get_latest_scheduled_task(context: "AgentContext", agent: Any) -> Optional[Dict[str, Any]]:
+    try:
+        messages = list(agent.history.output())
+    except Exception:
+        messages = []
+    for message in reversed(messages):
+        if not message.get("ai"):
+            task = get_scheduled_task_for_text(context, _message_text(message).strip())
+            if task:
+                return task
+            return None
+    return None
+
+
+def is_scheduled_task_turn(context: "AgentContext", loop_data: Any = None, agent: Any = None) -> bool:
+    if get_scheduled_task(context, loop_data) is not None:
+        return True
+    return bool(agent and get_latest_scheduled_task(context, agent))
+
+
+def _last_response_text(agent: Any) -> str:
+    try:
+        messages = list(agent.history.output())
+    except Exception:
+        messages = []
+    for message in reversed(messages):
+        if message.get("ai") and not _is_tool_result(message):
+            text = _assistant_final_text(message)
+            if text:
+                return text[:12000]
+    return ""
+
+
+def _recent_task_errors(agent: Any) -> list[str]:
+    errors_found: list[str] = []
+    try:
+        messages = list(agent.history.output())
+    except Exception:
+        messages = []
+    start_index = 0
+    for index, message in enumerate(messages):
+        if not message.get("ai"):
+            text = _message_text(message)
+            if text.strip().startswith("## Task"):
+                start_index = index
+    for message in messages[start_index:]:
+        text = _message_text(message) if not message.get("ai") else (_assistant_final_text(message) or _message_text(message))
+        lowered = text.lower()
+        if any(marker in lowered for marker in ("traceback", "exception", "error", "failed", "runtimeerror")):
+            redacted = _redact_secrets(text).strip()
+            if redacted:
+                errors_found.append(redacted[:2000])
+    return errors_found[-5:]
+
+
+def _format_schedule(schedule: Any) -> str:
+    if not isinstance(schedule, dict):
+        return ""
+    parts = []
+    for key in ("minute", "hour", "day", "month", "weekday", "timezone"):
+        value = schedule.get(key)
+        if value not in (None, ""):
+            parts.append(f"{key}={value}")
+    return ", ".join(parts)
+
+
+def build_scheduled_task_log(context: "AgentContext", agent: Any, task: Dict[str, Any]) -> str:
+    result = _last_response_text(agent) or str(task.get("last_result") or "").strip()
+    recent_errors = _recent_task_errors(agent)
+    status = "error" if recent_errors and not result else "completed_with_errors" if recent_errors else "completed"
+    lines = [
+        "# Agent Zero scheduled task log",
+        f"Task: {task.get('name') or 'unknown'}",
+        f"Task ID: {task.get('uuid') or 'unknown'}",
+        f"Type: {task.get('type') or 'scheduled'}",
+        f"Context ID: {getattr(context, 'id', '')}",
+        f"Schedule: {_format_schedule(task.get('schedule'))}",
+        f"Last observed run: {_get_timestamp()}",
+        f"Status: {status}",
+        "",
+        "## Prompt",
+        _redact_secrets(str(task.get("prompt") or "")).strip(),
+        "",
+        "## Latest result",
+        result or "No final response was recorded.",
+    ]
+    if recent_errors:
+        lines.extend(["", "## Recent errors or warnings"])
+        for item in recent_errors:
+            lines.extend(["- " + item.replace("\n", " ")])
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
 def _output_message_text(message: Dict[str, Any]) -> str:
     from helpers.history import output_text
     return output_text([message], ai_label="assistant", human_label="user").strip()
+
+
+def _strip_role_prefix(text: str) -> str:
+    return re.sub(r"(?i)^\s*(assistant|ai|user|human):\s*", "", text or "").strip()
+
+
+def _message_text(message: Dict[str, Any]) -> str:
+    return _strip_role_prefix(_output_message_text(message))
+
+
+def _parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+    text = _strip_role_prefix(text)
+    if not text.startswith("{"):
+        return None
+    try:
+        value = json.loads(text)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _assistant_final_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    payload = content if isinstance(content, dict) else None
+    if payload is None and isinstance(content, str):
+        payload = _parse_json_object(content)
+
+    if isinstance(payload, dict):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        tool_args = payload.get("tool_args")
+        if tool_name == "response" and isinstance(tool_args, dict):
+            text = str(tool_args.get("text") or "").strip()
+            return _redact_secrets(text) if text else ""
+        return ""
+
+    text = _message_text(message)
+    if not text or text.startswith("{"):
+        return ""
+    return _redact_secrets(text)
 
 
 def _is_tool_result(message: Dict[str, Any]) -> bool:
@@ -300,14 +472,30 @@ def _tag_safe(value: str) -> str:
 
 def build_chatlog(agent: Any) -> list[dict[str, str]]:
     entries: list[dict[str, str]] = []
+    skip_scheduled_turn = False
+    context = getattr(agent, "context", None)
     for message in agent.history.output():
+        if not message.get("ai"):
+            raw_text = _message_text(message).strip()
+            skip_scheduled_turn = bool(
+                context and get_scheduled_task_for_text(context, raw_text)
+            )
+            if skip_scheduled_turn:
+                continue
+            role = "user"
+            text = _redact_secrets(raw_text)
+        else:
+            if skip_scheduled_turn:
+                continue
+            role = "assistant"
+            text = _assistant_final_text(message)
+
         if _is_tool_result(message):
             continue
-        text = _redact_secrets(_output_message_text(message))
         if not text:
             continue
         entries.append({
-            "role": "assistant" if message.get("ai") else "user",
+            "role": role,
             "content": text[:12000],
             "timestamp": _get_timestamp(),
         })
@@ -335,6 +523,55 @@ def build_metadata(context: "AgentContext", agent: Any, message_count: int) -> D
     except Exception:
         pass
     return {key: value for key, value in metadata.items() if value}
+
+
+async def retain_scheduled_task_log(
+    context: "AgentContext",
+    agent: Any,
+    task: Dict[str, Any],
+) -> bool:
+    if not is_configured(context):
+        return False
+
+    config = _get_plugin_config(agent)
+    if not config.get("hindsight_retain_enabled", True):
+        return False
+    if not config.get("hindsight_scheduler_task_log_enabled", True):
+        return False
+
+    client = get_client(context)
+    if not client:
+        return False
+
+    bank_id = get_bank_id(context)
+    task_id = str(task.get("uuid") or getattr(context, "id", "default"))
+    document_id = f"agent-zero:scheduled-task:{task_id}"
+    content = _redact_secrets(build_scheduled_task_log(context, agent, task))[:12000]
+    metadata = build_metadata(context, agent, 1)
+    metadata.update({
+        "memory_area": "scheduled-tasks",
+        "task_id": task_id,
+        "task_name": str(task.get("name") or ""),
+        "task_type": str(task.get("type") or "scheduled"),
+    })
+
+    try:
+        if config.get("hindsight_operation_logging", True):
+            _log(context, f"Retain scheduled task log to bank '{bank_id}'", "util")
+        await client.aretain(
+            bank_id=bank_id,
+            content=content,
+            context=config.get("hindsight_scheduler_task_context") or _DEFAULTS["hindsight_scheduler_task_context"],
+            document_id=document_id,
+            metadata=metadata,
+            tags=["agent-zero", "scheduled-task", f"task:{_tag_safe(task_id)}"],
+        )
+        return True
+    except Exception as e:
+        _log(context, f"Retain scheduled task log error: {e}", "error")
+        return False
+    finally:
+        close_client(client)
 
 
 async def retain_chatlog(context: "AgentContext", agent: Any) -> bool:
@@ -474,39 +711,6 @@ async def retain_solutions(
     return retained
 
 
-async def retain_memory(context: "AgentContext", content: str, metadata: Optional[Dict[str, str]] = None) -> bool:
-    if not is_configured(context):
-        return False
-    agent0 = getattr(context, "agent0", None)
-    config = _get_plugin_config(agent0)
-    if not config.get("hindsight_retain_enabled", True):
-        return False
-
-    client = get_client(context)
-    if not client:
-        return False
-
-    bank_id = get_bank_id(context)
-    try:
-        kwargs: Dict[str, Any] = {
-            "bank_id": bank_id,
-            "content": _redact_secrets(content)[:10000],
-            "context": config.get("hindsight_retain_context"),
-            "tags": ["agent-zero", "manual"],
-        }
-        if metadata:
-            kwargs["metadata"] = metadata
-        if config.get("hindsight_operation_logging", True):
-            _log(context, f"Retain manual memory to bank '{bank_id}'", "util")
-        await client.aretain(**kwargs)
-        return True
-    except Exception as e:
-        _log(context, f"Retain error: {e}", "error")
-        return False
-    finally:
-        close_client(client)
-
-
 def _format_recall_result(result: Any) -> Optional[str]:
     if hasattr(result, "results"):
         results = getattr(result, "results", None) or []
@@ -563,67 +767,3 @@ async def recall_memories(context: "AgentContext", query: str) -> Optional[str]:
         return None
     finally:
         close_client(client)
-
-
-async def reflect_context(context: "AgentContext", query: str) -> Optional[str]:
-    if not is_configured(context):
-        return None
-
-    agent0 = getattr(context, "agent0", None)
-    config = _get_plugin_config(agent0)
-    if not config.get("hindsight_reflect_enabled", False):
-        return None
-
-    bank_id = get_bank_id(context)
-    cache_key = f"{bank_id}:{getattr(context, 'id', 'default')}"
-    cache_ttl = config.get("hindsight_cache_ttl", 120)
-    if cache_key in _reflect_cache:
-        cached_time, cached_content = _reflect_cache[cache_key]
-        if time.time() - cached_time < cache_ttl:
-            return cached_content
-
-    safe_query = query.strip()[:1500] if query else ""
-    if not safe_query:
-        return None
-
-    client = get_client(context)
-    if not client:
-        return None
-
-    try:
-        if config.get("hindsight_operation_logging", True):
-            _log(context, f"Reflect from bank '{bank_id}'", "util")
-        result = await client.areflect(
-            bank_id=bank_id,
-            query=safe_query,
-            budget=config.get("hindsight_reflect_budget", "low"),
-            max_tokens=config.get("hindsight_reflect_max_tokens", 500),
-        )
-        content = getattr(result, "content", None) or getattr(result, "text", None) or getattr(result, "response", None)
-        if not content:
-            result_str = str(result)
-            content = result_str if result_str and result_str != "None" else None
-        _reflect_cache[cache_key] = (time.time(), content)
-        return content
-    except Exception as e:
-        _log(context, f"Reflect error: {e}", "error")
-        return None
-    finally:
-        close_client(client)
-
-
-def clear_cache(bank_id: Optional[str] = None) -> None:
-    global _reflect_cache
-    if bank_id:
-        for key in [k for k in _reflect_cache if k.startswith(f"{bank_id}:")]:
-            del _reflect_cache[key]
-    else:
-        _reflect_cache = {}
-
-
-def cleanup(context: Optional["AgentContext"] = None) -> None:
-    if context:
-        bank_id = get_bank_id(context)
-        clear_cache(bank_id)
-    else:
-        clear_cache()

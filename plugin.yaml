@@ -1,6 +1,6 @@
 name: a0_hindsight
 title: Hindsight Memory
-description: Adds Hermes-style Hindsight recall and structured chatlog retention to Agent Zero.
+description: Adds lean Hindsight recall, structured chatlog retention, scheduled task result logs, and optional solution extraction to Agent Zero.
 version: 2.4.3
 settings_sections:
   - agent

@@ -9,3 +9,6 @@ build/
 .env
 execute_record.json
 vendor/
+.dependency_status.json
+config.json
+.toggle-*

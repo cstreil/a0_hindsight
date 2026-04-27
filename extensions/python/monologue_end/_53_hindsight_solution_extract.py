@@ -38,6 +38,8 @@ class HindsightSolutionExtract(Extension):
         config = hindsight_helper._get_plugin_config(self.agent)
         if not config.get("hindsight_solution_extract_enabled", False):
             return
+        if hindsight_helper.is_scheduled_task_turn(context, loop_data):
+            return
 
         all_output = self.agent.history.output()
         chatlog = hindsight_helper.build_chatlog(self.agent)

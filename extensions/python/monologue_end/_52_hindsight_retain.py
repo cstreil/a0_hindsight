@@ -38,6 +38,16 @@ class HindsightRetain(Extension):
         if not config.get("hindsight_retain_enabled", True):
             return
 
+        scheduled_task = hindsight_helper.get_scheduled_task(context, loop_data)
+        if scheduled_task:
+            try:
+                asyncio.create_task(
+                    self._retain_scheduled_task_log(self.agent, context, scheduled_task)
+                )
+            except RuntimeError:
+                pass
+            return
+
         chatlog = hindsight_helper.build_chatlog(self.agent)
         if not chatlog:
             return
@@ -91,6 +101,24 @@ class HindsightRetain(Extension):
                 context.log.log(
                     type="warning",
                     heading="Hindsight retain background error",
+                    content=errors.format_error(e),
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    async def _retain_scheduled_task_log(agent, context, scheduled_task):
+        try:
+            return await hindsight_helper.retain_scheduled_task_log(
+                context=context,
+                agent=agent,
+                task=scheduled_task,
+            )
+        except Exception as e:
+            try:
+                context.log.log(
+                    type="warning",
+                    heading="Hindsight scheduled task retain error",
                     content=errors.format_error(e),
                 )
             except Exception:

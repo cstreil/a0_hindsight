@@ -1,6 +1,6 @@
 title: Hindsight Memory
-description: Augments Agent Zero's memory with Hindsight semantic search and disposition-aware context generation.
-github: https://github.com/neurocis/a0_hindsight
+description: Adds lean Hindsight recall, structured chatlog retention, scheduled task result logs, and optional solution extraction.
+github: https://github.com/cstreil/a0_hindsight
 tags:
   - memory
   - semantic
